@@ -1,0 +1,14 @@
+name: build
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: make check on Alpine
+        run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:3.24 sh -euc '
+            apk add -q build-base
+            make check'
