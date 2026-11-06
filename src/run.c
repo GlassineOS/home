@@ -111,35 +111,6 @@ static pid_t spawn(struct zygote *z, const void *req, size_t len, int child_end)
 	}
 }
 
-static bool wait_exit(struct zygote *z, pid_t want, int *status, int timeout_ms)
-{
-	for (int i = 0; i < z->ndone; i++)
-		if (z->done[i].pid == want) {
-			*status = z->done[i].status;
-			z->done[i] = z->done[--z->ndone];
-			return true;
-		}
-	long long end = now_ms() + timeout_ms;
-	for (;;) {
-		long long left = end - now_ms();
-		char type;
-		pid_t pid;
-		int st = 0;
-		if (left <= 0 || !zygote_recv(z, &type, &pid, &st, (int)left))
-			return false;
-		if (type != MSG_EXITED)
-			continue;
-		if (pid == want) {
-			*status = st;
-			return true;
-		}
-		if (z->ndone < (int)(sizeof z->done / sizeof *z->done)) {
-			z->done[z->ndone].pid = pid;
-			z->done[z->ndone++].status = st;
-		}
-	}
-}
-
 static void reply_fd(int s, struct broker *b, const char *path)
 {
 	long long size = 0;
@@ -174,11 +145,36 @@ static void reply_fd(int s, struct broker *b, const char *path)
 	send(s, m, (size_t)n, MSG_NOSIGNAL);
 }
 
-void run_widget(struct zygote *z, const char *dir, const struct manifest *m, const struct value *props,
-		const struct run_opts *o, struct run_result *r)
+struct run {
+	struct zygote *z;
+	struct run_result *r;
+	enum { ST_RUNNING, ST_REAPING, ST_DONE } state;
+	pid_t pid;
+	int sock;
+	long long start, reap_end;
+	int wall;
+	bool killed, got_final, kill_sent;
+	bool edit;
+	struct broker b;
+	char *msg;
+	int status;
+};
+
+struct run *run_start(struct zygote *z, const char *dir, const struct manifest *m, const struct value *props,
+		      const struct run_opts *o, struct run_result *r)
 {
 	memset(r, 0, sizeof *r);
 	r->status = RUN_CRASH;
+	struct run *run = calloc(1, sizeof *run);
+	if (!run) {
+		snprintf(r->msg, sizeof r->msg, "out of memory");
+		return NULL;
+	}
+	run->z = z;
+	run->r = r;
+	run->sock = -1;
+	run->state = ST_DONE;
+	run->edit = o->edit;
 	const char *name = o->edit ? "widget.edit.lua" : "widget.lua";
 	char path[4096];
 	snprintf(path, sizeof path, "%s/%s", dir, name);
@@ -186,7 +182,7 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 	char *script = read_script(path, &slen, r->msg, sizeof r->msg);
 	if (!script) {
 		r->status = RUN_ERROR;
-		return;
+		return run;
 	}
 	struct buf pj = { 0 }, aj = { 0 }, req = { 0 };
 	v_to_json(props, &pj);
@@ -213,85 +209,105 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv)) {
 		snprintf(r->msg, sizeof r->msg, "socketpair: %s", strerror(errno));
 		buf_free(&req);
-		return;
+		return run;
 	}
-	long long start = now_ms();
-	pid_t pid = spawn(z, req.p, req.len, sv[1]);
+	run->start = now_ms();
+	run->pid = spawn(z, req.p, req.len, sv[1]);
 	close(sv[1]);
 	buf_free(&req);
-	if (pid <= 0) {
+	if (run->pid <= 0) {
 		close(sv[0]);
 		snprintf(r->msg, sizeof r->msg, "could not start the run");
+		return run;
+	}
+	run->sock = sv[0];
+	broker_init(&run->b, m, o->home);
+	run->b.force_fallback = o->force_fallback;
+	run->wall = o->wall_ms ? o->wall_ms : RUN_WALL_MS;
+	run->msg = malloc(DESC_MAX_JSON + 16);
+	run->state = ST_RUNNING;
+	return run;
+}
+
+int run_fd(const struct run *run)
+{
+	if (!run)
+		return -1;
+	return run->state == ST_RUNNING ? run->sock : run->state == ST_REAPING ? run->z->fd : -1;
+}
+
+int run_timeout_ms(const struct run *run)
+{
+	if (!run || run->state == ST_DONE)
+		return 0;
+	long long end = run->state == ST_RUNNING ? run->start + run->wall : run->reap_end;
+	long long left = end - now_ms();
+	return left < 0 ? 0 : left > 60000 ? 60000 : (int)left;
+}
+
+bool run_done(const struct run *run)
+{
+	return !run || run->state == ST_DONE;
+}
+
+static void one_message(struct run *run)
+{
+	struct run_result *r = run->r;
+	char *msg = run->msg;
+	ssize_t n = recv(run->sock, msg, DESC_MAX_JSON + 15, MSG_DONTWAIT);
+	if (n < 0 && (errno == EAGAIN || errno == EINTR))
+		return;
+	if (n <= 0) { /* the child is gone */
+		close(run->sock);
+		run->sock = -1;
+		run->state = ST_REAPING;
+		run->reap_end = now_ms() + 1000;
 		return;
 	}
-
-	struct broker b;
-	broker_init(&b, m, o->home);
-	b.force_fallback = o->force_fallback;
-	int wall = o->wall_ms ? o->wall_ms : RUN_WALL_MS;
-	bool killed = false, got_final = false;
-	char *msg = malloc(DESC_MAX_JSON + 16);
-	for (;;) {
-		long long left = start + wall - now_ms();
-		if (left <= 0) {
-			kill(pid, SIGKILL);
-			killed = true;
-			break;
+	msg[n] = 0;
+	if (msg[0] == MSG_OPEN) {
+		if (memchr(msg + 1, 0, (size_t)n - 1))
+			send(run->sock, "Nd" "not a valid path", 18, MSG_NOSIGNAL);
+		else
+			reply_fd(run->sock, &run->b, msg + 1);
+	} else if (msg[0] == MSG_PRINT) {
+		if (r->nlog < RUN_MAX_LOG && utf8_valid(msg + 1, (size_t)n - 1))
+			r->log[r->nlog++] = strdup(msg + 1);
+	} else if (msg[0] == MSG_DONE && !run->got_final) {
+		run->got_final = true;
+		char err[256];
+		struct value *v = v_from_json(msg + 1, (size_t)n - 1, 32, err, sizeof err);
+		struct value *d = v ? desc_normalize(v, run->edit, broker_path_check, &run->b, err, sizeof err) : NULL;
+		v_free(v);
+		if (!d) {
+			r->status = RUN_ERROR;
+			snprintf(r->msg, sizeof r->msg, "invalid output: %s", err);
+		} else {
+			r->status = RUN_OK;
+			r->desc = d;
+			v_to_json(d, &r->json);
+			r->hash = hash64(r->json.p, r->json.len);
 		}
-		struct pollfd p = { sv[0], POLLIN, 0 };
-		int pr = poll(&p, 1, (int)left);
-		if (pr < 0 && errno == EINTR)
-			continue;
-		if (pr <= 0)
-			continue;
-		ssize_t n = recv(sv[0], msg, DESC_MAX_JSON + 15, 0);
-		if (n <= 0)
-			break; /* the child is gone */
-		msg[n] = 0;
-		if (msg[0] == MSG_OPEN) {
-			if (memchr(msg + 1, 0, (size_t)n - 1))
-				send(sv[0], "Nd" "not a valid path", 18, MSG_NOSIGNAL);
-			else
-				reply_fd(sv[0], &b, msg + 1);
-		} else if (msg[0] == MSG_PRINT) {
-			if (r->nlog < RUN_MAX_LOG && utf8_valid(msg + 1, (size_t)n - 1))
-				r->log[r->nlog++] = strdup(msg + 1);
-		} else if (msg[0] == MSG_DONE && !got_final) {
-			got_final = true;
-			char err[256];
-			struct value *v = v_from_json(msg + 1, (size_t)n - 1, 32, err, sizeof err);
-			struct value *d = v ? desc_normalize(v, o->edit, broker_path_check, &b, err, sizeof err) : NULL;
-			v_free(v);
-			if (!d) {
-				r->status = RUN_ERROR;
-				snprintf(r->msg, sizeof r->msg, "invalid output: %s", err);
-			} else {
-				r->status = RUN_OK;
-				r->desc = d;
-				v_to_json(d, &r->json);
-				r->hash = hash64(r->json.p, r->json.len);
-			}
-		} else if (msg[0] == MSG_ERROR && !got_final && n >= 2) {
-			got_final = true;
-			r->status = msg[1] == ERR_TIME ? RUN_TIME : msg[1] == ERR_MEMORY ? RUN_MEMORY : RUN_ERROR;
-			size_t l = (size_t)n - 2;
-			if (!utf8_valid(msg + 2, l))
-				l = 0;
-			snprintf(r->msg, sizeof r->msg, "%.*s", (int)l, msg + 2);
-		}
+	} else if (msg[0] == MSG_ERROR && !run->got_final && n >= 2) {
+		run->got_final = true;
+		r->status = msg[1] == ERR_TIME ? RUN_TIME : msg[1] == ERR_MEMORY ? RUN_MEMORY : RUN_ERROR;
+		size_t l = (size_t)n - 2;
+		if (!utf8_valid(msg + 2, l))
+			l = 0;
+		snprintf(r->msg, sizeof r->msg, "%.*s", (int)l, msg + 2);
 	}
-	free(msg);
-	close(sv[0]);
+}
 
-	int status = 0;
-	if (!wait_exit(z, pid, &status, killed ? 2000 : 1000)) {
-		kill(pid, SIGKILL);
-		wait_exit(z, pid, &status, 2000);
-	}
-	if (killed) {
+static void finish(struct run *run)
+{
+	struct run_result *r = run->r;
+	int status = run->status;
+	free(run->msg);
+	run->msg = NULL;
+	if (run->killed) {
 		run_result_free(r);
 		r->status = RUN_TIMEOUT;
-		snprintf(r->msg, sizeof r->msg, "stopped after %d ms", wall);
+		snprintf(r->msg, sizeof r->msg, "stopped after %d ms", run->wall);
 	} else if (WIFSIGNALED(status)) {
 		int sig = WTERMSIG(status);
 		v_free(r->desc);
@@ -313,15 +329,108 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 		buf_free(&r->json);
 		r->status = RUN_CRASH;
 		snprintf(r->msg, sizeof r->msg, "exited with status %d", WEXITSTATUS(status));
-	} else if (!got_final) {
+	} else if (!run->got_final) {
 		r->status = RUN_CRASH;
 		snprintf(r->msg, sizeof r->msg, "ended without output (status %d)", WEXITSTATUS(status));
 	}
-	for (size_t i = 0; i < b.nfiles; i++) {
-		r->files[i] = b.files[i];
-		b.files[i] = NULL;
+	for (size_t i = 0; i < run->b.nfiles; i++) {
+		r->files[i] = run->b.files[i];
+		run->b.files[i] = NULL;
 	}
-	r->nfiles = b.nfiles;
-	b.nfiles = 0;
-	broker_free(&b);
+	r->nfiles = run->b.nfiles;
+	run->b.nfiles = 0;
+	broker_free(&run->b);
+	run->state = ST_DONE;
+}
+
+/* The exit status of our child: kept ones first, then one message from the zygote. */
+static bool reap_one(struct run *run)
+{
+	struct zygote *z = run->z;
+	for (int i = 0; i < z->ndone; i++)
+		if (z->done[i].pid == run->pid) {
+			run->status = z->done[i].status;
+			z->done[i] = z->done[--z->ndone];
+			return true;
+		}
+	char type;
+	pid_t pid;
+	int st = 0;
+	if (!zygote_recv(z, &type, &pid, &st, 0))
+		return false;
+	if (type != MSG_EXITED)
+		return false;
+	if (pid == run->pid) {
+		run->status = st;
+		return true;
+	}
+	if (z->ndone < (int)(sizeof z->done / sizeof *z->done)) {
+		z->done[z->ndone].pid = pid;
+		z->done[z->ndone++].status = st;
+	}
+	return false;
+}
+
+bool run_step(struct run *run)
+{
+	if (!run || run->state == ST_DONE)
+		return true;
+	if (run->state == ST_RUNNING) {
+		if (now_ms() >= run->start + run->wall) {
+			kill(run->pid, SIGKILL);
+			run->killed = true;
+			close(run->sock);
+			run->sock = -1;
+			run->state = ST_REAPING;
+			run->reap_end = now_ms() + 2000;
+			return false;
+		}
+		struct pollfd p = { run->sock, POLLIN, 0 };
+		while (run->state == ST_RUNNING && poll(&p, 1, 0) > 0)
+			one_message(run);
+		if (run->state == ST_RUNNING)
+			return false;
+	}
+	/* reaping */
+	while (!reap_one(run)) {
+		struct pollfd p = { run->z->fd, POLLIN, 0 };
+		if (poll(&p, 1, 0) > 0)
+			continue;
+		if (now_ms() < run->reap_end)
+			return false;
+		if (!run->kill_sent) {
+			kill(run->pid, SIGKILL);
+			run->kill_sent = true;
+			run->reap_end = now_ms() + 2000;
+			return false;
+		}
+		break; /* gave up on the exit status */
+	}
+	finish(run);
+	return true;
+}
+
+void run_free(struct run *run)
+{
+	if (!run)
+		return;
+	if (run->state != ST_DONE) {
+		if (run->sock >= 0)
+			close(run->sock);
+		kill(run->pid, SIGKILL);
+		free(run->msg);
+		broker_free(&run->b);
+	}
+	free(run);
+}
+
+void run_widget(struct zygote *z, const char *dir, const struct manifest *m, const struct value *props,
+		const struct run_opts *o, struct run_result *r)
+{
+	struct run *run = run_start(z, dir, m, props, o, r);
+	while (!run_step(run)) {
+		struct pollfd p = { run_fd(run), POLLIN, 0 };
+		poll(&p, 1, run_timeout_ms(run));
+	}
+	run_free(run);
 }

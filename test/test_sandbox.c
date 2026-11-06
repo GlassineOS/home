@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -411,6 +412,46 @@ static void outputs(void)
 			  "{\"action\":{\"a\":\"set\",\"props\":{\"category\":\"Office\"}},\"label\":\"Office\",\"meta\":\"5 apps\"}],\"t\":\"list\"}]");
 }
 
+static long long mono_ms(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* the event-loop API: run_start returns at once, run_step finishes it */
+static void stepping(void)
+{
+	char err[512];
+	struct manifest m;
+	const char *dirs[2] = { W("loop"), W("hello") };
+	for (int k = 0; k < 2; k++) {
+		CHECK(manifest_load(dirs[k], &m, err, sizeof err));
+		struct value *props = props_effective(&m, NULL);
+		struct run_opts opts = { .now = 1700000000, .home = home };
+		struct run_result r;
+		long long t0 = mono_ms();
+		struct run *run = run_start(&z, dirs[k], &m, props, &opts, &r);
+		CHECK(run != NULL);
+		CHECK(mono_ms() - t0 < 150); /* no waiting for the script */
+		CHECK(run_fd(run) >= 0);
+		int steps = 0;
+		while (!run_step(run)) {
+			struct pollfd p = { run_fd(run), POLLIN, 0 };
+			poll(&p, 1, run_timeout_ms(run));
+			steps++;
+		}
+		CHECK(run_done(run));
+		CHECK(run_fd(run) == -1);
+		CHECK(steps >= 1);
+		CHECK_INT(r.status, k == 0 ? RUN_TIME : RUN_OK);
+		run_free(run);
+		run_result_free(&r);
+		v_free(props);
+		manifest_free(&m);
+	}
+}
+
 int main(void)
 {
 	if (!zygote_start(&z)) {
@@ -426,6 +467,7 @@ int main(void)
 	seccomp();
 	pausing();
 	outputs();
+	stepping();
 	zygote_stop(&z);
 	return t_done("sandbox");
 }
