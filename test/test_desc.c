@@ -100,5 +100,15 @@ int main(void)
 	CHECK(strlen(r) == strlen("[{\"t\":\"title\",\"text\":\"\"}]") + 120);
 	CHECK_STR(norm("[{\"t\":\"meta\",\"text\":\"Read\",\"time\":1700000000.7}]", false),
 		  "[{\"t\":\"meta\",\"text\":\"Read\",\"time\":1700000000}]");
+	/* normalizing is idempotent: Home re-normalizes what the run normalized */
+	const char *all = "[{\"t\":\"title\",\"text\":\"T\"},{\"t\":\"text\",\"text\":\"x\",\"soft\":true},"
+		"{\"t\":\"progress\",\"value\":0.4231,\"label\":\"42 %\"},{\"t\":\"meta\",\"text\":\"m\",\"time\":5},"
+		"{\"t\":\"list\",\"rows\":[{\"label\":\"a\",\"meta\":\"b\",\"selected\":true,\"action\":{\"a\":\"set\",\"props\":{\"k\":1}}}]},"
+		"{\"t\":\"button\",\"label\":\"Go\",\"icon\":\"x\",\"action\":{\"a\":\"open\",\"app\":\"a\",\"file\":\"/f\"}},"
+		"{\"t\":\"image\",\"src\":\"icon:a\",\"w\":3,\"h\":4,\"side\":\"right\",\"fit\":\"contain\",\"alt\":\"x\"}]";
+	char once[2048];
+	snprintf(once, sizeof once, "%s", norm(all, true));
+	CHECK(strncmp(once, "ERR", 3) != 0);
+	CHECK_STR(norm(once, true), once);
 	return t_done("desc");
 }

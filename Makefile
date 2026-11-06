@@ -37,8 +37,8 @@ $(O)/test_%: test/test_%.c $(CORE_OBJ) $(SANDBOX_TEST_OBJ) test/t.h | $(O)
 $(O):
 	mkdir -p $@
 
-check: $(TESTS:%=$(O)/test_%)
-	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done
+check: $(TESTS:%=$(O)/test_%) $(O)/glassine-home-run
+	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh
 
 clean:
 	rm -rf $(O)

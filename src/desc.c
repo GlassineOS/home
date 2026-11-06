@@ -395,11 +395,15 @@ struct value *desc_normalize(const struct value *in, bool edit, desc_path_check 
 				v_map_set(o, "time", v_int((long long)floor(d)));
 			}
 		} else if (!strcmp(kind, "progress")) {
-			static const char *const keys[] = { "t", "value", "label", NULL };
+			static const char *const keys[] = { "t", "value", "permille", "label", NULL };
 			if (!only_keys(&c, p, keys, "ui.progress"))
 				goto bad;
 			const struct value *v = v_map_get(p, "value");
 			double d = v && v->t == V_INT ? (double)v->u.i : v && v->t == V_FLOAT ? v->u.f : NAN;
+			/* the normalized form again (Home re-checks the run's output) */
+			const struct value *pm = v_map_get(p, "permille");
+			if (!v && pm && pm->t == V_INT)
+				d = (double)pm->u.i / 1000.0;
 			if (isnan(d)) {
 				nfail(&c, "%s", "ui.progress needs a number from 0 to 1");
 				goto bad;
