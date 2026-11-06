@@ -30,7 +30,7 @@ name = "Continue reading"                  # one line, at most 64 bytes
 icon = "menu_book"                         # an icon name: [a-z0-9_-]
 description = "The book you read last."    # optional, at most 200 bytes
 sizes = ["wide", "half"]                   # "half" and/or "wide"; the first is the default
-reads = ["~/.config/koreader/history.lua", "~/Books/"]
+reads = ["~/.config/koreader/history.lua", "{books}/"]
 refresh = { on_change = true }             # and/or every = "1h"
 format = 1                                 # optional; a newer number needs a newer Home
 
@@ -38,8 +38,8 @@ format = 1                                 # optional; a newer number needs a ne
 category = "Games"
 ```
 
-- `reads`: the only files a run can read. A path is absolute or starts with `~/`; a trailing `/`
-  makes it a directory prefix (everything beneath it). No `.` or `..` parts, nothing under `/proc`,
+- `reads`: the only files a run can read. A path is absolute, starts with `~/`, or starts with a
+  place (`{books}/`, see Places); a trailing `/` makes it a directory prefix (everything beneath it). No `.` or `..` parts, nothing under `/proc`,
   `/sys`, `/dev` or `/run`, and `/` alone is refused. Symlinks beneath a listed directory are never
   followed.
 - `refresh.on_change`: run when a file the last run read changes (needs `reads`).
@@ -47,6 +47,27 @@ category = "Games"
   minutes. Runs sit on a shared grid aligned to local time, so widgets with the same interval run
   together.
 - `props`: strings, integers, floats or booleans. Names are `[a-z_][a-z0-9_]*`, at most 32 of them.
+
+### Places
+
+A read may start with a named place instead of a fixed folder. The one place so far is `{books}`,
+the user's books folder. Home resolves it from the user's setting before it checks the reads, and the
+same rules apply inside it: no links followed, nothing outside it. An unknown place name is a manifest
+error.
+
+The setting is the file `~/.config/glassine/places` (`$XDG_CONFIG_HOME/glassine/places` when that is
+set), in the same TOML subset, one string per place; Settings can own it later, and other places can
+join (names this Home doesn't know are ignored):
+
+```toml
+books = "~/Library"     # absolute or ~/; the default is ~/Books
+```
+
+When the place is unset (an empty value, a broken file, a value that isn't an absolute or `~/`
+path), missing, itself a link, or really inside `/proc`, `/sys`, `/dev` or `/run`, reads inside it
+fail: `ctx.read` and `ctx.load_lua` raise an error for an unset place and return `nil, reason` for a
+missing folder. Home never falls back to a wider folder. A widget may also name paths as
+`{books}/...` in `ctx.read` and `ctx.load_lua`.
 
 There is no network key: widgets have no network access of any kind.
 
@@ -77,7 +98,7 @@ give the same output), `utf8`, `ipairs`, `pairs`, `next`, `type`, `tostring`, `t
 |---|---|
 | `ctx.read(path)` | The file's contents as a string; `nil, reason` if it doesn't exist or can't be read. Raises an error for a path outside `reads`. At most 2 MB. |
 | `ctx.load_lua(path)` | Evaluates a Lua data file (like KOReader's `history.lua`) in an empty environment and returns its value: tables, strings, numbers, booleans. Functions are dropped. A data file can't reach anything: it has no globals except `inf` and `nan` (KOReader writes those as bare words), no libraries, no string methods. `nil, reason` on a missing or broken file. |
-| `ctx.sidecar(book)` | The path of a KOReader book's metadata: `/x/Book.epub` → `/x/Book.sdr/metadata.epub.lua`. Reading it needs the book's directory in `reads`. |
+| `ctx.sidecar(book)` | The path of a KOReader book's metadata: `/x/Book.epub` → `/x/Book.sdr/metadata.epub.lua`. Reading it needs the book's directory in `reads`, usually through `{books}/`. |
 | `ctx.now` | The time of the run, in seconds since 1970. |
 | `ctx.apps` | App data for Home's own app widgets' settings (for example `categories = { {name=, count=} }`); absent for other widgets. |
 

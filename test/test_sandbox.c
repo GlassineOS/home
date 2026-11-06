@@ -203,6 +203,78 @@ static void files(void)
 	}
 }
 
+static void set_places(const char *content)
+{
+	char p[PATH_MAX];
+	snprintf(p, sizeof p, "%s/.config/glassine/places", home);
+	if (content) {
+		FILE *f = fopen(p, "w");
+		fputs(content, f);
+		fclose(f);
+	} else {
+		remove(p);
+	}
+}
+
+/* reads inside {books}: resolved from the places setting before the reads checks */
+static void places(void)
+{
+	char cmd[PATH_MAX * 2];
+	snprintf(cmd, sizeof cmd,
+		 "cd '%s' && mkdir -p .config/glassine Books Library && echo -n default > Books/a.txt && "
+		 "echo -n other > Library/a.txt && ln -s Library LinkLib && ln -s ../secret.txt Library/link && "
+		 "ln -s /proc procl", home);
+	sh(cmd);
+	for (int fb = 0; fb < 2; fb++) {
+		set_places(NULL); /* the default, ~/Books */
+		struct out o = run(W("books"), NULL, 0, fb, false, NULL);
+		CHECK_STR(text_of(&o), "read: default");
+		char abs[PATH_MAX + 64];
+		snprintf(abs, sizeof abs, "{\"path\":\"%s/Books/a.txt\"}", home);
+		o = run(W("books"), abs, 0, fb, false, NULL);
+		CHECK_STR(text_of(&o), "read: default");
+
+		set_places("books = \"~/Library\"\n");
+		o = run(W("books"), NULL, 0, fb, false, NULL);
+		CHECK_STR(text_of(&o), "read: other");
+		/* the old library is no longer readable */
+		o = run(W("books"), abs, 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		/* links inside the place are not followed */
+		o = run(W("books"), "{\"path\":\"{books}/link\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+
+		/* unset: the read fails, nothing wider */
+		set_places("books = \"\"\n");
+		o = run(W("books"), NULL, 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		o = run(W("books"), abs, 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+
+		/* a missing folder: no such file */
+		set_places("books = \"~/Nowhere\"\n");
+		o = run(W("books"), NULL, 0, fb, false, NULL);
+		CHECK_STR(text_of(&o), "nil: no such file");
+
+		/* a place that is a link is refused */
+		set_places("books = \"~/LinkLib\"\n");
+		o = run(W("books"), NULL, 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		CHECK(strstr(o.text, "symlink") != NULL);
+
+		/* a place in a system area is refused, also through a link on the way */
+		set_places("books = \"/proc/self\"\n");
+		o = run(W("books"), "{\"path\":\"{books}/environ\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		/* ~/procl -> /proc: the place itself is no link, but where it really is decides */
+		set_places("books = \"~/procl/sys\"\n");
+		o = run(W("books"), "{\"path\":\"{books}/kernel/ostype\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		CHECK(strstr(o.text, "not in the widget's reads") != NULL);
+	}
+	set_places(NULL);
+}
+
 static void data_files(void)
 {
 	struct out o = run(W("data"), NULL, 0, false, false, NULL);
@@ -347,6 +419,7 @@ int main(void)
 	}
 	setup_home();
 	files();
+	places();
 	data_files();
 	environment();
 	limits();

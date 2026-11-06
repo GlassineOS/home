@@ -11,6 +11,7 @@
 #include <stddef.h>
 
 #include "manifest.h"
+#include "places.h"
 
 #define BROKER_MAX_FILE (2 * 1024 * 1024)
 #define BROKER_MAX_FILES 64
@@ -18,18 +19,22 @@
 struct broker {
 	const struct manifest *m;
 	char home[1024];        /* expands "~/" */
+	struct places places;   /* expands "{books}/" */
 	bool force_fallback;    /* tests: use the openat walk instead of openat2 */
 	char *files[BROKER_MAX_FILES]; /* absolute paths the run asked for (allowed ones), for watching */
 	size_t nfiles;
 	int requests;
 };
 
-/* home may be NULL: then $HOME is used. */
+/*
+ * home may be NULL: then $HOME is used. The places come from home's places file (or
+ * $XDG_CONFIG_HOME's when home is NULL).
+ */
 void broker_init(struct broker *b, const struct manifest *m, const char *home);
 void broker_free(struct broker *b);
 
 /*
- * Expands "~/" and checks the path lexically (absolute, no empty, "." or ".." parts).
+ * Expands "~/" and "{place}/" and checks the path lexically (absolute, no empty, "." or ".." parts).
  * Writes the absolute path to out. Returns false for a malformed path.
  */
 bool broker_expand(const struct broker *b, const char *req, char *out, size_t outlen);

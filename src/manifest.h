@@ -18,7 +18,7 @@
 #define MIN_EVERY_S (15 * 60)
 
 struct read_entry {
-	char *path;  /* as written: absolute or starting with "~/" */
+	char *path;  /* as written: absolute, or starting with "~/" or "{place}/" */
 	bool dir;    /* written with a trailing '/': a directory prefix */
 };
 
@@ -42,6 +42,11 @@ bool manifest_parse(const char *text, size_t len, struct manifest *m, char *err,
 bool manifest_load(const char *dir, struct manifest *m, char *err, size_t errlen);
 
 void manifest_free(struct manifest *m);
+
+/* A read path: absolute, "~/" or "{place}/", no empty, "." or ".." parts; a trailing '/' marks a directory. */
+bool read_path_valid(const char *p, bool *dir);
+/* Under /proc, /sys, /dev or /run: never readable for a widget, whatever a manifest or a place says. */
+bool path_forbidden_root(const char *p);
 
 /* "15m", "1h", "2h30m", "1d": seconds, or -1. */
 long parse_duration(const char *s);

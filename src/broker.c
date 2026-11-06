@@ -15,6 +15,8 @@ void broker_init(struct broker *b, const struct manifest *m, const char *home)
 {
 	memset(b, 0, sizeof *b);
 	b->m = m;
+	char pp[4096];
+	bool have = places_path(home, pp, sizeof pp);
 	if (!home)
 		home = getenv("HOME");
 	snprintf(b->home, sizeof b->home, "%s", home ? home : "");
@@ -22,6 +24,7 @@ void broker_init(struct broker *b, const struct manifest *m, const char *home)
 	size_t n = strlen(b->home);
 	while (n > 1 && b->home[n - 1] == '/')
 		b->home[--n] = 0;
+	places_load(&b->places, have ? pp : NULL, b->home);
 }
 
 void broker_free(struct broker *b)
@@ -51,13 +54,25 @@ static bool lexical_ok(const char *p, bool allow_trailing_slash)
 	return true;
 }
 
-static bool expand(const char *home, const char *req, char *out, size_t outlen, bool dir)
+/* place_len: set to the length of the resolved place prefix in out, 0 when none */
+static bool expand(const char *home, const struct places *pl, const char *req, char *out, size_t outlen, bool dir,
+		   size_t *place_len)
 {
 	size_t n = strlen(req);
+	if (place_len)
+		*place_len = 0;
 	if (n == 0 || n > MAX_PATH_LEN || !utf8_valid(req, n))
 		return false;
 	int w;
-	if (req[0] == '~' && req[1] == '/') {
+	if (req[0] == '{') {
+		const char *close = strchr(req, '}');
+		const char *folder = close ? places_get(pl, req + 1, (size_t)(close - req - 1)) : NULL;
+		if (!folder || close[1] != '/')
+			return false; /* unknown or unset: the read fails, nothing wider */
+		w = snprintf(out, outlen, "%s%s", folder, close + 1);
+		if (place_len)
+			*place_len = strlen(folder);
+	} else if (req[0] == '~' && req[1] == '/') {
 		if (home[0] != '/')
 			return false;
 		w = snprintf(out, outlen, "%s%s", strcmp(home, "/") ? home : "", req + 1);
@@ -77,17 +92,35 @@ bool broker_expand(const struct broker *b, const char *req, char *out, size_t ou
 {
 	if (req[0] && req[strlen(req) - 1] == '/')
 		return false;
-	return expand(b->home, req, out, outlen, false);
+	return expand(b->home, &b->places, req, out, outlen, false, NULL);
 }
 
-/* Finds the read covering abs; writes the directory to open from and the path beneath it. */
-static bool cover(const struct broker *b, const char *abs, char *root, size_t rootlen, const char **rel)
+/*
+ * Finds the read covering abs; writes the directory to open from and the path beneath it.
+ * For a read inside a place, that directory is the place folder itself (*place set), so
+ * nothing between the place and the file is followed if it is a link.
+ */
+static bool cover(const struct broker *b, const char *abs, char *root, size_t rootlen, const char **rel, bool *place)
 {
-	char e[MAX_PATH_LEN + 1100];
+	char e[MAX_PATH_LEN + 2200];
+	*place = false;
 	for (size_t i = 0; i < b->m->nreads; i++) {
 		const struct read_entry *r = &b->m->reads[i];
-		if (!expand(b->home, r->path, e, sizeof e, r->dir))
+		size_t pl;
+		if (!expand(b->home, &b->places, r->path, e, sizeof e, r->dir, &pl))
 			continue;
+		if (pl) {
+			bool hit = r->dir ? !strncmp(abs, e, strlen(e)) && abs[strlen(e)] : !strcmp(abs, e);
+			if (r->dir && e[strlen(e) - 1] != '/')
+				hit = false;
+			if (hit && abs[pl] == '/' && abs[pl + 1]) {
+				snprintf(root, rootlen, "%.*s", (int)pl, abs);
+				*rel = abs + pl + 1;
+				*place = true;
+				return true;
+			}
+			continue;
+		}
 		if (r->dir) {
 			size_t n = strlen(e);
 			if (e[n - 1] != '/' && n + 1 < sizeof e) {
@@ -114,7 +147,8 @@ bool broker_allowed(const struct broker *b, const char *abs)
 {
 	char root[4096];
 	const char *rel;
-	return lexical_ok(abs, false) && cover(b, abs, root, sizeof root, &rel);
+	bool place;
+	return lexical_ok(abs, false) && cover(b, abs, root, sizeof root, &rel, &place);
 }
 
 bool broker_path_check(void *broker, const char *path)
@@ -204,15 +238,37 @@ int broker_open(struct broker *b, const char *req, long long *size)
 		errno = EINVAL;
 		return -1;
 	}
-	if (!cover(b, abs, root, sizeof root, &rel)) {
+	bool place;
+	if (!cover(b, abs, root, sizeof root, &rel, &place)) {
 		errno = EACCES;
 		return -1;
 	}
 	record(b, abs);
-	/* the read's own directory is the user's: symlinks up to it are followed */
-	int dfd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
-	if (dfd < 0)
+	/*
+	 * The read's own directory is the user's: links on the way to it are followed,
+	 * except that a place folder must not itself be a link.
+	 */
+	int dfd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC | (place ? O_NOFOLLOW : 0));
+	if (dfd < 0) {
+		if (place && (errno == ENOTDIR || errno == ELOOP)) {
+			struct stat st;
+			if (!lstat(root, &st) && S_ISLNK(st.st_mode))
+				errno = EACCES;
+		}
 		return -1;
+	}
+	/* wherever the directory really is, it must not be a system area */
+	char fdp[64], real[4096];
+	snprintf(fdp, sizeof fdp, "/proc/self/fd/%d", dfd);
+	ssize_t rl = readlink(fdp, real, sizeof real - 1);
+	if (rl > 0) {
+		real[rl] = 0;
+		if (path_forbidden_root(real)) {
+			close(dfd);
+			errno = EACCES;
+			return -1;
+		}
+	}
 	int fd = open_beneath(dfd, rel, b->force_fallback);
 	int e = errno;
 	close(dfd);

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "pack.h"
+#include "places.h"
 #include "toml.h"
 
 #define MAX_MANIFEST (64 * 1024)
@@ -74,7 +75,7 @@ bool widget_id_valid(const char *id)
 }
 
 /* Paths that would let a widget read Home's own process state or devices, whatever the manifest says. */
-static bool forbidden_root(const char *p)
+bool path_forbidden_root(const char *p)
 {
 	static const char *const roots[] = { "/proc", "/sys", "/dev", "/run" };
 	for (size_t i = 0; i < sizeof roots / sizeof *roots; i++) {
@@ -85,8 +86,7 @@ static bool forbidden_root(const char *p)
 	return false;
 }
 
-/* Absolute or "~/" path, no empty, "." or ".." components; a trailing '/' marks a directory. */
-static bool read_path_valid(const char *p, bool *dir)
+bool read_path_valid(const char *p, bool *dir)
 {
 	size_t n = strlen(p);
 	if (n == 0 || n > MAX_PATH_LEN || !utf8_valid(p, n))
@@ -96,11 +96,16 @@ static bool read_path_valid(const char *p, bool *dir)
 		c = p + 1;
 	else if (p[0] == '~' && p[1] == '/')
 		c = p + 2;
-	else
+	else if (p[0] == '{') {
+		const char *close = strchr(p, '}');
+		if (!close || !place_known(p + 1, (size_t)(close - p - 1)) || close[1] != '/')
+			return false;
+		c = close + 2;
+	} else
 		return false;
 	*dir = p[n - 1] == '/';
 	if (!*c)
-		return *dir && p[0] == '~'; /* "~/" is allowed, "/" is not */
+		return *dir && p[0] != '/'; /* "~/" and "{place}/" are allowed, "/" is not */
 	const char *end = p + n - (*dir ? 1 : 0);
 	while (c < end) {
 		const char *s = memchr(c, '/', (size_t)(end - c));
@@ -109,7 +114,7 @@ static bool read_path_valid(const char *p, bool *dir)
 			return false;
 		c += len + 1;
 	}
-	if (p[0] == '/' && forbidden_root(p))
+	if (p[0] == '/' && path_forbidden_root(p))
 		return false;
 	return true;
 }
@@ -223,9 +228,12 @@ bool manifest_parse(const char *text, size_t len, struct manifest *m, char *err,
 		for (size_t i = 0; ok && i < v->u.a.n; i++) {
 			const struct value *s = v->u.a.v[i];
 			bool dir = false;
-			if (s->t != V_STR || !read_path_valid(s->u.s.p, &dir))
-				ok = fail(err, errlen, "reads: \"%s\" is not an allowed path (absolute or ~/, no . or .. parts, "
-						       "not under /proc, /sys, /dev or /run)", s->t == V_STR ? s->u.s.p : "?");
+			const char *close = s->t == V_STR && s->u.s.p[0] == '{' ? strchr(s->u.s.p, '}') : NULL;
+			if (close && !place_known(s->u.s.p + 1, (size_t)(close - s->u.s.p - 1)))
+				ok = fail(err, errlen, "reads: \"%s\" names an unknown place (known: {books})", s->u.s.p);
+			else if (s->t != V_STR || !read_path_valid(s->u.s.p, &dir))
+				ok = fail(err, errlen, "reads: \"%s\" is not an allowed path (absolute, ~/ or {place}/, no . or .. "
+						       "parts, not under /proc, /sys, /dev or /run)", s->t == V_STR ? s->u.s.p : "?");
 			else {
 				m->reads[m->nreads].path = xstrdup(s->u.s.p);
 				m->reads[m->nreads++].dir = dir;

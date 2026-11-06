@@ -37,6 +37,23 @@ files=$(HOME="$h" "$run" -v "$top/widgets/reading" 2>&1 >/dev/null | sed "s|$h|~
 check "files read" "read: ~/.config/koreader/history.lua
 read: ~/Books/The Lighthouse Keeper's Almanac.sdr/metadata.epub.lua" "$files"
 
+# a library outside ~/Books, set in the places file
+reset_home
+mv "$h/Books" "$h/Library"
+mkdir -p "$h/.config/glassine"
+printf 'books = "~/Library"\n' > "$h/.config/glassine/places"
+sed -i "s|$h/Books/|$h/Library/|" "$h/.config/koreader/history.lua"
+want=$(sed "s|@HOME@/Books/|$h/Library/|g" "$fx/expected.json")
+check "library in ~/Library" "$want" "$(HOME="$h" "$run" "$top/widgets/reading")"
+# and ~/Books is then not readable: the metadata is gone, the title comes from the file name
+sed -i "s|$h/Library/|$h/Books/|" "$h/.config/koreader/history.lua"
+mkdir -p "$h/Books" && cp -R "$h/Library/"* "$h/Books/"
+got=$(HOME="$h" "$run" "$top/widgets/reading" | grep -c 'Ada Example' || true)
+check "old library not read" "0" "$got"
+files=$(HOME="$h" "$run" -v "$top/widgets/reading" 2>&1 >/dev/null | grep -c sdr || true)
+check "old library not opened" "0" "$files"
+
+reset_home
 # a book without metadata: the title comes from the file name
 sed -i '4,7d' "$h/.config/koreader/history.lua"
 got=$(HOME="$h" "$run" "$top/widgets/reading")

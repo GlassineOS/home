@@ -12,13 +12,13 @@ CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Werror=imp
 LDLIBS += -lm
 
 O := out
-CORE := value toml pack manifest desc broker sched conf catalog
+CORE := value toml pack manifest desc broker sched conf catalog places
 CORE_OBJ := $(CORE:%=$(O)/%.o)
 # the sandbox; tests link a build of the child with test-only payloads
 SANDBOX := zygote seccomp run
 SANDBOX_OBJ := $(SANDBOX:%=$(O)/%.o) $(O)/child.o
 SANDBOX_TEST_OBJ := $(SANDBOX:%=$(O)/%.o) $(O)/child-hooks.o
-TESTS := value pack manifest desc sched conf catalog sandbox
+TESTS := value pack manifest desc sched conf catalog places sandbox
 
 all: $(O)/glassine-home-run
 

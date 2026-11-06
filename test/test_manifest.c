@@ -120,6 +120,28 @@ static void parse_errors(void)
 			manifest_free(&m);
 		}
 	}
+	/* places */
+	static const struct { const char *read, *msg; } places[] = {
+		{ "{music}/", "reads: \"{music}/\" names an unknown place (known: {books})" },
+		{ "{books}", "reads: \"{books}\" is not an allowed path (absolute, ~/ or {place}/, no . or .. parts, not under /proc, /sys, /dev or /run)" },
+		{ "{books}x/", "reads: \"{books}x/\" is not an allowed path (absolute, ~/ or {place}/, no . or .. parts, not under /proc, /sys, /dev or /run)" },
+		{ "{books}/../x", "reads: \"{books}/../x\" is not an allowed path (absolute, ~/ or {place}/, no . or .. parts, not under /proc, /sys, /dev or /run)" },
+		{ "{books/", "reads: \"{books/\" is not an allowed path (absolute, ~/ or {place}/, no . or .. parts, not under /proc, /sys, /dev or /run)" },
+	};
+	for (size_t i = 0; i < sizeof places / sizeof *places; i++) {
+		char d[512];
+		snprintf(d, sizeof d, "name = \"a\"\nicon = \"x\"\nsizes = [\"wide\"]\nreads = [\"%s\"]\n", places[i].read);
+		bool ok = manifest_parse(d, strlen(d), &m, err, sizeof err);
+		CHECK(!ok);
+		if (ok)
+			manifest_free(&m);
+		CHECK_STR(err, places[i].msg);
+	}
+	const char *pdoc = "name = \"a\"\nicon = \"x\"\nsizes = [\"wide\"]\nreads = [\"{books}/\", \"{books}/x/y.lua\"]\n";
+	CHECK(manifest_parse(pdoc, strlen(pdoc), &m, err, sizeof err));
+	CHECK(m.reads[0].dir && !m.reads[1].dir);
+	manifest_free(&m);
+
 	/* the processes' neighbours are fine: /procfoo is not /proc */
 	const char *doc = "name = \"a\"\nicon = \"x\"\nsizes = [\"wide\"]\nreads = [\"/procfoo/x\", \"~/\"]\n";
 	CHECK(manifest_parse(doc, strlen(doc), &m, err, sizeof err));

@@ -4,6 +4,6 @@ name = "Continue reading"
 icon = "menu_book"
 description = "The book you read last in KOReader, with its progress."
 sizes = ["wide", "half"]
-# KOReader's history, and the library whose books' metadata (BOOK.sdr/) may be read.
-reads = ["~/.config/koreader/history.lua", "~/Books/"]
+# KOReader's history, and the user's books folder (KOReader keeps BOOK.sdr/ beside each book).
+reads = ["~/.config/koreader/history.lua", "{books}/"]
 refresh = { on_change = true }
