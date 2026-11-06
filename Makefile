@@ -12,9 +12,9 @@ CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Werror=imp
 LDLIBS += -lm
 
 O := out
-CORE := value toml pack manifest
+CORE := value toml pack manifest desc
 CORE_OBJ := $(CORE:%=$(O)/%.o)
-TESTS := value pack manifest
+TESTS := value pack manifest desc
 
 all: $(O)/glassine-home-run
 
