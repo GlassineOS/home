@@ -1,0 +1,12 @@
+-- SPDX-License-Identifier: GPL-2.0-or-later
+return { render = function(ctx, props)
+  if props.case == "function" then return { ui.title("x"), print } end
+  if props.case == "mixed" then return { ui.title("x"), { t = "text", text = "y", 1 } } end
+  if props.case == "titles" then return { ui.title("a"), ui.title("b") } end
+  if props.case == "number" then return 42 end
+  if props.case == "set" then return { ui.button("x", nil, ui.set { a = 1 }) } end
+  if props.case == "error" then error("boom") end
+  if props.case == "errtable" then error({}) end
+  if props.case == "imgfile" then return { ui.image { src = "file:/etc/hostname", h = 10, alt = "x" } } end
+  return {}
+end }

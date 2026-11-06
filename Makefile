@@ -12,17 +12,27 @@ CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Werror=imp
 LDLIBS += -lm
 
 O := out
-CORE := value toml pack manifest desc
+CORE := value toml pack manifest desc broker
 CORE_OBJ := $(CORE:%=$(O)/%.o)
-TESTS := value pack manifest desc
+# the sandbox; tests link a build of the child with test-only payloads
+SANDBOX := zygote seccomp run
+SANDBOX_OBJ := $(SANDBOX:%=$(O)/%.o) $(O)/child.o
+SANDBOX_TEST_OBJ := $(SANDBOX:%=$(O)/%.o) $(O)/child-hooks.o
+TESTS := value pack manifest desc sandbox
 
 all: $(O)/glassine-home-run
 
 $(O)/%.o: src/%.c src/*.h | $(O)
 	$(CC) $(CFLAGS) $(LUA_CFLAGS) -c -o $@ $<
 
-$(O)/test_%: test/test_%.c $(CORE_OBJ) test/t.h | $(O)
-	$(CC) $(CFLAGS) $(LUA_CFLAGS) -o $@ $< $(CORE_OBJ) $(LUA_LIBS) $(LDLIBS)
+$(O)/child-hooks.o: src/child.c src/*.h | $(O)
+	$(CC) $(CFLAGS) $(LUA_CFLAGS) -DGH_TEST_HOOKS -c -o $@ $<
+
+$(O)/glassine-home-run: src/cli/run.c $(CORE_OBJ) $(SANDBOX_OBJ) | $(O)
+	$(CC) $(CFLAGS) -o $@ $< $(CORE_OBJ) $(SANDBOX_OBJ) $(LUA_LIBS) $(LDLIBS)
+
+$(O)/test_%: test/test_%.c $(CORE_OBJ) $(SANDBOX_TEST_OBJ) test/t.h | $(O)
+	$(CC) $(CFLAGS) $(LUA_CFLAGS) -o $@ $< $(CORE_OBJ) $(SANDBOX_TEST_OBJ) $(LUA_LIBS) $(LDLIBS)
 
 $(O):
 	mkdir -p $@
