@@ -12,9 +12,9 @@ CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Werror=imp
 LDLIBS += -lm
 
 O := out
-CORE := value toml
+CORE := value toml pack
 CORE_OBJ := $(CORE:%=$(O)/%.o)
-TESTS := value
+TESTS := value pack
 
 all: $(O)/glassine-home-run
 
