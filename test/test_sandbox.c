@@ -17,6 +17,7 @@
 
 #include "../src/manifest.h"
 #include "../src/sandbox.h"
+#include "../src/sched.h"
 #include "t.h"
 
 static struct zygote z;
@@ -279,6 +280,22 @@ static void limits(void)
 	CHECK_INT(o.status, RUN_TIMEOUT);
 }
 
+/* real failing runs: the last good output stays, the third failure in a row pauses */
+static void pausing(void)
+{
+	struct widget_state st = { 0 };
+	struct out o = run(W("badout"), "{\"case\":\"none\"}", 0, false, false, NULL);
+	CHECK_INT(state_record(&st, o.status, o.hash), OUTCOME_CHANGED);
+	o = run(W("badout"), "{\"case\":\"error\"}", 0, false, false, NULL);
+	CHECK_INT(state_record(&st, o.status, o.hash), OUTCOME_FAILED);
+	o = run(W("loop"), NULL, 0, false, false, NULL);
+	CHECK_INT(state_record(&st, o.status, o.hash), OUTCOME_FAILED);
+	o = run(W("hello"), NULL, HOOK_SOCKET, false, false, NULL);
+	CHECK_INT(state_record(&st, o.status, o.hash), OUTCOME_PAUSED);
+	CHECK(!state_should_run(&st, TRIGGER_APPEAR));
+	CHECK(st.has_output);
+}
+
 static void seccomp(void)
 {
 	static const int hooks[] = { HOOK_SOCKET, HOOK_EXEC, HOOK_OPEN, HOOK_FORK };
@@ -338,6 +355,7 @@ int main(void)
 	environment();
 	limits();
 	seccomp();
+	pausing();
 	outputs();
 	zygote_stop(&z);
 	return t_done("sandbox");
