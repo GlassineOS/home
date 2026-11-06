@@ -79,6 +79,12 @@ int main(void)
 	CHECK_STR(read_file(path), first);
 	conf_free(&d);
 
+	/* a fresh home without ~/.config */
+	char fresh[1100];
+	snprintf(fresh, sizeof fresh, "%s/out/conf-test/fresh/.config/glassine/home.conf", cwd);
+	system("mkdir -p out/conf-test/fresh");
+	CHECK(conf_save(fresh, &c, err, sizeof err));
+
 	/* arranging: move, remove, page swap by permutation */
 	CHECK(conf_move(&c, 2, 0));
 	CHECK_STR(c.w[0].widget, "user/clock");

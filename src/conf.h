@@ -38,7 +38,7 @@ struct home_conf {
 	size_t n;
 	char **favourites;
 	size_t nfav;
-	bool read_only;      /* written by a newer Home: never overwrite it */
+	bool read_only;      /* written by a newer Home, or unreadable: never overwrite it */
 };
 
 /* $XDG_CONFIG_HOME/glassine/home.conf or $HOME/.config/glassine/home.conf */

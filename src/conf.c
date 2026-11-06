@@ -179,7 +179,14 @@ bool conf_load(const char *path, struct home_conf *c, char *err, size_t errlen)
 	if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size <= MAX_CONF && (text = malloc((size_t)st.st_size + 1)))
 		n = read(fd, text, (size_t)st.st_size);
 	close(fd);
-	bool ok = n == st.st_size && parse(text, (size_t)n, c, err, errlen);
+	if (n != st.st_size) {
+		/* an I/O problem, not a broken file: leave it where it is */
+		free(text);
+		snprintf(err, errlen, "%s: can't read it", path);
+		c->read_only = true;
+		return false;
+	}
+	bool ok = parse(text, (size_t)n, c, err, errlen);
 	free(text);
 	if (ok)
 		return true;
@@ -245,7 +252,11 @@ bool conf_save(const char *path, const struct home_conf *c, char *err, size_t er
 	snprintf(dirbuf, sizeof dirbuf, "%s", path);
 	char *dir = dirname(dirbuf);
 	snprintf(tmp, sizeof tmp, "%s.tmp", path);
-	mkdir(dir, 0700); /* the glassine config directory, if new */
+	/* the config directories, if new (~/.config, then glassine) */
+	char parent[4096];
+	snprintf(parent, sizeof parent, "%s", dir);
+	mkdir(dirname(parent), 0700);
+	mkdir(dir, 0700);
 	int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
 	bool ok = fd >= 0;
 	size_t off = 0;

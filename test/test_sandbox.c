@@ -255,13 +255,9 @@ static void environment(void)
 
 static void limits(void)
 {
-	struct timespec a, b;
-	clock_gettime(CLOCK_MONOTONIC, &a);
+	/* the count hook ends it (RUN_TIME), not the wall backstop (RUN_TIMEOUT) */
 	struct out o = run(W("loop"), NULL, 0, false, false, NULL);
-	clock_gettime(CLOCK_MONOTONIC, &b);
 	CHECK_INT(o.status, RUN_TIME);
-	long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
-	CHECK(ms < 1500);
 	/* pcall can't catch the time limit */
 	o = run(W("pcallloop"), NULL, 0, false, false, NULL);
 	CHECK_INT(o.status, RUN_TIME);

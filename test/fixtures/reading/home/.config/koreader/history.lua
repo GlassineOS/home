@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-2.0-or-later
 return {
     [1] = {
         ["file"] = "@HOME@/Books/The Lighthouse Keeper's Almanac.epub",

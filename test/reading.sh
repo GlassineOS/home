@@ -38,7 +38,7 @@ check "files read" "read: ~/.config/koreader/history.lua
 read: ~/Books/The Lighthouse Keeper's Almanac.sdr/metadata.epub.lua" "$files"
 
 # a book without metadata: the title comes from the file name
-sed -i '3,6d' "$h/.config/koreader/history.lua"
+sed -i '4,7d' "$h/.config/koreader/history.lua"
 got=$(HOME="$h" "$run" "$top/widgets/reading")
 check "no metadata" "[{\"alt\":\"Cover of Notes on Small Gardens\",\"fit\":\"cover\",\"h\":96,\"side\":\"left\",\"src\":\"cover:$h/Books/Notes on Small Gardens.pdf\",\"t\":\"image\",\"w\":64},{\"t\":\"title\",\"text\":\"Notes on Small Gardens\"},{\"action\":{\"a\":\"open\",\"app\":\"koreader\",\"file\":\"$h/Books/Notes on Small Gardens.pdf\"},\"icon\":\"play_arrow\",\"label\":\"Continue\",\"t\":\"button\"},{\"t\":\"meta\",\"text\":\"Read\",\"time\":1699000000}]" "$got"
 
