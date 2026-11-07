@@ -48,6 +48,12 @@ struct zygote {
 	/* exit statuses that arrived while waiting for something else */
 	struct { pid_t pid; int status; } done[16];
 	int ndone;
+	/*
+	 * Its socket hung up (killed, out of memory): a run in flight ends as a crash and
+	 * no run starts again. It isn't forked anew: Home has threads by then (sandbox.h's
+	 * rule for zygote_start), so widgets run again when Home restarts.
+	 */
+	bool gone;
 };
 
 /* Forks the zygote. Call first thing in main(), before threads or large allocations. */

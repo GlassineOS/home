@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -585,6 +586,48 @@ static void stepping(void)
 	}
 }
 
+/*
+ * The zygote dies during a run (an OOM kill): the run ends as a crash at once instead
+ * of waiting on the zygote's hung-up socket forever, and later runs fail at once.
+ */
+static void helper_gone(void)
+{
+	struct zygote z2;
+	CHECK(zygote_start(&z2));
+	char err[512];
+	struct manifest m;
+	CHECK(manifest_load(W("hello"), &m, err, sizeof err));
+	struct value *props = props_effective(&m, NULL);
+	/* HOOK_BLOCK waits on its socket: only the zygote's death ends it before the wall clock */
+	struct run_opts opts = { .now = 1700000000, .home = home, .test_hook = HOOK_BLOCK, .wall_ms = 5000 };
+	struct run_result r;
+	struct run *run = run_start(&z2, W("hello"), &m, props, &opts, &r);
+	CHECK(run != NULL && !run_done(run));
+	kill(z2.pid, SIGKILL);
+	alarm(10); /* a run_step that never returns ends the suite here */
+	while (!run_step(run)) {
+		struct pollfd p = { run_fd(run), POLLIN, 0 };
+		poll(&p, 1, run_timeout_ms(run));
+	}
+	alarm(0);
+	CHECK(z2.gone);
+	CHECK_INT(r.status, RUN_CRASH);
+	CHECK_STR(r.msg, "stopped: Home's widget helper stopped; widgets run again when Home restarts");
+	run_free(run);
+	run_result_free(&r);
+	/* the next run doesn't wait: it is done when run_start returns */
+	opts.test_hook = 0;
+	run = run_start(&z2, W("hello"), &m, props, &opts, &r);
+	CHECK(run != NULL && run_done(run));
+	CHECK_INT(r.status, RUN_CRASH);
+	CHECK_STR(r.msg, "could not start the run: Home's widget helper stopped; widgets run again when Home restarts");
+	run_free(run);
+	run_result_free(&r);
+	v_free(props);
+	manifest_free(&m);
+	zygote_stop(&z2);
+}
+
 int main(void)
 {
 	if (!zygote_start(&z)) {
@@ -604,6 +647,7 @@ int main(void)
 	boundary();
 	outputs();
 	stepping();
+	helper_gone();
 	zygote_stop(&z);
 	return t_done("sandbox");
 }

@@ -38,6 +38,8 @@ void run_result_free(struct run_result *r)
 	memset(r, 0, sizeof *r);
 }
 
+#define HELPER_GONE "Home's widget helper stopped; widgets run again when Home restarts"
+
 static long long now_ms(void)
 {
 	struct timespec t;
@@ -82,21 +84,36 @@ static char *read_script(const char *path, size_t *len, char *err, size_t errlen
 	return b;
 }
 
-/* Receives one zygote message; MSG_EXITED for other pids are kept for later. */
-static bool zygote_recv(struct zygote *z, char *type, pid_t *pid, int *status, int timeout_ms)
+/*
+ * Receives one zygote message: 1 with a message, 0 with none (yet, or one too short to
+ * use), -1 when the zygote is gone (end of file or an error on its socket; z->gone is
+ * set and stays set). MSG_EXITED for other pids are kept for later by the callers.
+ */
+static int zygote_recv(struct zygote *z, char *type, pid_t *pid, int *status, int timeout_ms)
 {
+	if (z->gone)
+		return -1;
 	struct pollfd p = { z->fd, POLLIN, 0 };
-	if (poll(&p, 1, timeout_ms) <= 0)
-		return false;
+	int pr = poll(&p, 1, timeout_ms);
+	if (pr < 0 && errno == EINTR)
+		return 0;
+	if (pr <= 0)
+		return pr < 0 ? (z->gone = true, -1) : 0;
 	char m[64];
-	ssize_t n = recv(z->fd, m, sizeof m, 0);
+	ssize_t n = recv(z->fd, m, sizeof m, MSG_DONTWAIT);
+	if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+		return 0;
+	if (n <= 0) {
+		z->gone = true;
+		return -1;
+	}
 	if (n < 1 + (ssize_t)sizeof(pid_t))
-		return false;
+		return 0;
 	*type = m[0];
 	memcpy(pid, m + 1, sizeof *pid);
 	if (m[0] == MSG_EXITED && n >= 1 + (ssize_t)(sizeof(pid_t) + sizeof(int)))
 		memcpy(status, m + 1 + sizeof(pid_t), sizeof *status);
-	return true;
+	return 1;
 }
 
 static pid_t spawn(struct zygote *z, const void *req, size_t len, int child_end)
@@ -110,13 +127,18 @@ static pid_t spawn(struct zygote *z, const void *req, size_t len, int child_end)
 	c->cmsg_type = SCM_RIGHTS;
 	c->cmsg_len = CMSG_LEN(sizeof(int));
 	memcpy(CMSG_DATA(c), &child_end, sizeof child_end);
-	if (sendmsg(z->fd, &mh, MSG_NOSIGNAL) != (ssize_t)len)
+	if (z->gone)
 		return -1;
+	if (sendmsg(z->fd, &mh, MSG_NOSIGNAL) != (ssize_t)len) {
+		if (errno == EPIPE || errno == ECONNRESET)
+			z->gone = true;
+		return -1;
+	}
 	for (;;) {
 		char type;
 		pid_t pid;
 		int st = 0;
-		if (!zygote_recv(z, &type, &pid, &st, 5000))
+		if (zygote_recv(z, &type, &pid, &st, 5000) != 1)
 			return -1;
 		if (type == MSG_SPAWNED)
 			return pid;
@@ -189,7 +211,7 @@ struct run {
 	int sock;
 	long long start, reap_end;
 	int wall;
-	bool killed, stalled, got_final, kill_sent;
+	bool killed, stalled, got_final, kill_sent, helper_gone;
 	bool edit;
 	struct broker b;
 	char *msg;
@@ -253,7 +275,7 @@ struct run *run_start(struct zygote *z, const char *dir, const struct manifest *
 	buf_free(&req);
 	if (run->pid <= 0) {
 		close(sv[0]);
-		snprintf(r->msg, sizeof r->msg, "could not start the run");
+		snprintf(r->msg, sizeof r->msg, z->gone ? "could not start the run: " HELPER_GONE : "could not start the run");
 		return run;
 	}
 	run->sock = sv[0];
@@ -354,6 +376,10 @@ static void finish(struct run *run)
 		run_result_free(r);
 		r->status = RUN_TIMEOUT;
 		snprintf(r->msg, sizeof r->msg, "stopped after %d ms", run->wall);
+	} else if (run->helper_gone) {
+		run_result_free(r);
+		r->status = RUN_CRASH;
+		snprintf(r->msg, sizeof r->msg, "stopped: " HELPER_GONE);
 	} else if (run->stalled) {
 		run_result_free(r);
 		r->status = RUN_CRASH;
@@ -393,32 +419,36 @@ static void finish(struct run *run)
 	run->state = ST_DONE;
 }
 
-/* The exit status of our child: kept ones first, then one message from the zygote. */
-static bool reap_one(struct run *run)
+/*
+ * The exit status of our child: kept ones first, then one message from the zygote.
+ * 1 when it's there, 0 not yet, -1 when the zygote is gone and it never will be.
+ */
+static int reap_one(struct run *run)
 {
 	struct zygote *z = run->z;
 	for (int i = 0; i < z->ndone; i++)
 		if (z->done[i].pid == run->pid) {
 			run->status = z->done[i].status;
 			z->done[i] = z->done[--z->ndone];
-			return true;
+			return 1;
 		}
 	char type;
 	pid_t pid;
 	int st = 0;
-	if (!zygote_recv(z, &type, &pid, &st, 0))
-		return false;
+	int got = zygote_recv(z, &type, &pid, &st, 0);
+	if (got != 1)
+		return got;
 	if (type != MSG_EXITED)
-		return false;
+		return 0;
 	if (pid == run->pid) {
 		run->status = st;
-		return true;
+		return 1;
 	}
 	if (z->ndone < (int)(sizeof z->done / sizeof *z->done)) {
 		z->done[z->ndone].pid = pid;
 		z->done[z->ndone++].status = st;
 	}
-	return false;
+	return 0;
 }
 
 bool run_step(struct run *run)
@@ -442,7 +472,12 @@ bool run_step(struct run *run)
 			return false;
 	}
 	/* reaping */
-	while (!reap_one(run)) {
+	int got;
+	while ((got = reap_one(run)) != 1) {
+		if (got < 0) { /* the zygote is gone (its child with it, PR_SET_PDEATHSIG) */
+			run->helper_gone = true;
+			break;
+		}
 		struct pollfd p = { run->z->fd, POLLIN, 0 };
 		if (poll(&p, 1, 0) > 0)
 			continue;
