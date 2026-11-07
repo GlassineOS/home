@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "homeread"
+icon = "science"
+sizes = ["wide"]
+reads = ["~/"]
+[props]
+path = "~/etc/hostname"

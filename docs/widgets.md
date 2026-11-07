@@ -40,7 +40,7 @@ category = "Games"
 
 - `reads`: the only files a run can read. A path is absolute, starts with `~/`, or starts with a
   place (`{books}/`, see Places); a trailing `/` makes it a directory prefix (everything beneath it). No `.` or `..` parts, nothing under `/proc`,
-  `/sys`, `/dev` or `/run`, and `/` alone is refused. Symlinks beneath a listed directory are never
+  `/sys`, `/dev` or `/run`, and `/` alone is refused (and `~/` covers nothing when the home folder is `/`). Symlinks beneath a listed directory are never
   followed.
 - `refresh.on_change`: run when a file the last run read changes (needs `reads`).
 - `refresh.every`: `"15m"`, `"1h"`, `"2h30m"`, `"1d"`: at least 15 minutes and a multiple of 15

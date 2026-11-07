@@ -205,6 +205,23 @@ static void files(void)
 	}
 }
 
+/* HOME=/: "~/" is then "/", which covers nothing, as "/" itself can't be listed */
+static void home_is_root(void)
+{
+	char saved[PATH_MAX];
+	snprintf(saved, sizeof saved, "%s", home);
+	snprintf(home, sizeof home, "/");
+	for (int fb = 0; fb < 2; fb++) {
+		struct out o = run(W("homeread"), "{\"path\":\"~/etc/hostname\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		CHECK(strstr(o.text, "not in the widget's reads") != NULL);
+		o = run(W("homeread"), "{\"path\":\"~/proc/version\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		CHECK(strstr(o.text, "not in the widget's reads") != NULL);
+	}
+	snprintf(home, sizeof home, "%s", saved);
+}
+
 static void set_places(const char *content)
 {
 	char p[PATH_MAX];
@@ -472,6 +489,7 @@ int main(void)
 	}
 	setup_home();
 	files();
+	home_is_root();
 	places();
 	data_files();
 	environment();
