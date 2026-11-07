@@ -21,6 +21,7 @@ struct broker {
 	char home[1024];        /* expands "~/" */
 	struct places places;   /* expands "{books}/" */
 	bool force_fallback;    /* tests: use the openat walk instead of openat2 */
+	bool test_no_proc;      /* tests: as if /proc weren't there to tell an fd's real path */
 	char *files[BROKER_MAX_FILES]; /* absolute paths the run asked for (allowed ones), for watching */
 	size_t nfiles;
 	int requests;
@@ -44,7 +45,8 @@ bool broker_allowed(const struct broker *b, const char *abs);
 
 /*
  * Opens a file for the run. Returns an fd (regular file, at most BROKER_MAX_FILE bytes,
- * size in *size) or -1 with errno: EACCES (not in the reads, or a symlink on the way),
+ * size in *size) or -1 with errno: EACCES (not in the reads, a symlink on the way, in a
+ * system area, or no /proc to tell where it really is),
  * ENOENT, EFBIG, EINVAL (not a regular file or a malformed path), EMFILE (too many requests).
  * Allowed paths are recorded in b->files even when opening fails, so a file that
  * appears later is still watched.

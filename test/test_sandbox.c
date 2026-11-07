@@ -86,6 +86,8 @@ static void setup_home(void)
 	put("data/huge.lua", "local s = \"x\" for i = 1, 30 do s = s .. s end return s\n");
 	put("data/cyclic.lua", "local t = { name = \"c\" } t.self = t return t\n");
 	put("data/syntax.lua", "return {\n");
+	put("data/many.lua", "local t = {} for i = 1, 40000 do t[i] = {} end return t\n");
+	put("data/deep.lua", "local t = {} for i = 1, 100 do t = { t } end return t\n");
 	put_bytecode("data/bytecode.lua", "return { pwned = true }");
 	snprintf(cmd, sizeof cmd,
 		 "cd '%s' && ln -s ../secret.txt data/link && ln -s .. data/linkdir && ln -s sub data/sublink && "
@@ -102,6 +104,8 @@ struct out {
 	uint64_t hash;
 	size_t nfiles;
 	char files[4][256];
+	size_t nlog;
+	char log0[400]; /* the first print line */
 };
 
 static struct out run(const char *dir, const char *props_json, int hook, bool fallback, bool edit, const char *apps)
@@ -128,6 +132,9 @@ static struct out run(const char *dir, const char *props_json, int hook, bool fa
 	o.nfiles = r.nfiles;
 	for (size_t i = 0; i < r.nfiles && i < 4; i++)
 		snprintf(o.files[i], sizeof o.files[i], "%s", r.files[i] + strlen(home));
+	o.nlog = r.nlog;
+	if (r.nlog)
+		snprintf(o.log0, sizeof o.log0, "%s", r.log[0]);
 	run_result_free(&r);
 	v_free(props);
 	v_free(saved);
@@ -202,6 +209,52 @@ static void files(void)
 		CHECK_STR(text_of(&o), "nil: no such file");
 		CHECK_INT(o.nfiles, 1);
 	}
+}
+
+/* without /proc the real path of what was opened can't be checked: the read is refused */
+static void no_proc(void)
+{
+	char err[512];
+	struct manifest m;
+	if (!manifest_load(W("files"), &m, err, sizeof err)) {
+		fprintf(stderr, "files: %s\n", err);
+		CHECK(false);
+		return;
+	}
+	for (int np = 0; np < 2; np++) {
+		struct broker b;
+		broker_init(&b, &m, home);
+		b.test_no_proc = np;
+		long long size = 0;
+		int fd = broker_open(&b, "~/data/ok.txt", &size);
+		if (np) {
+			CHECK_INT(fd, -1);
+			CHECK_INT(errno, EACCES);
+		} else {
+			CHECK(fd >= 0 && size == 5);
+		}
+		if (fd >= 0)
+			close(fd);
+		broker_free(&b);
+	}
+	manifest_free(&m);
+}
+
+/* HOME=/: "~/" is then "/", which covers nothing, as "/" itself can't be listed */
+static void home_is_root(void)
+{
+	char saved[PATH_MAX];
+	snprintf(saved, sizeof saved, "%s", home);
+	snprintf(home, sizeof home, "/");
+	for (int fb = 0; fb < 2; fb++) {
+		struct out o = run(W("homeread"), "{\"path\":\"~/etc/hostname\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		CHECK(strstr(o.text, "not in the widget's reads") != NULL);
+		o = run(W("homeread"), "{\"path\":\"~/proc/version\"}", 0, fb, false, NULL);
+		CHECK_INT(o.status, RUN_ERROR);
+		CHECK(strstr(o.text, "not in the widget's reads") != NULL);
+	}
+	snprintf(home, sizeof home, "%s", saved);
 }
 
 static void set_places(const char *content)
@@ -307,6 +360,16 @@ static void data_files(void)
 	CHECK(strstr(text_of(&o), "data file too large") != NULL);
 	o = run(W("data"), "{\"file\":\"loop.lua\"}", 0, false, false, NULL);
 	CHECK_INT(o.status, RUN_TIME);
+	/*
+	 * fits in its own 4 MB, but the copy doesn't fit in the widget's: over the memory
+	 * limit (the data state used to panic while copying, reported as blocked)
+	 */
+	o = run(W("data"), "{\"file\":\"many.lua\"}", 0, false, false, NULL);
+	CHECK_INT(o.status, RUN_MEMORY);
+	CHECK_STR(o.text, "over the memory limit");
+	/* too deep for the copy: nil and a reason, as for a broken file */
+	o = run(W("data"), "{\"file\":\"deep.lua\"}", 0, false, false, NULL);
+	CHECK_STR(text_of(&o), "error: ~/data/deep.lua: data nested too deep");
 	/* a data file is a file like any other: unlisted is refused */
 	o = run(W("data"), "{\"file\":\"../secret.txt\"}", 0, false, false, NULL);
 	CHECK_INT(o.status, RUN_ERROR);
@@ -324,6 +387,21 @@ static void environment(void)
 	CHECK(strstr(o.text, "binary chunk") != NULL);
 	o = run(W("norender"), NULL, 0, false, false, NULL);
 	CHECK_STR(o.text, "the script must return { render = function(ctx, props) ... end }");
+
+	/*
+	 * pairs and next walk keys in one order, whatever Lua's hash seed (it changes every
+	 * second): false, true, numbers, strings bytewise, then other keys; a key removed
+	 * during a loop is skipped
+	 */
+	o = run(W("order"), NULL, 0, false, false, NULL);
+	const char *all = "false true -2 1.5 3 Bravo alpha charlie delta echo foxtrot golf hotel table";
+	char want[512];
+	snprintf(want, sizeof want, "[{\"t\":\"text\",\"text\":\"%s\"},{\"t\":\"text\",\"text\":\"%s\"},"
+		 "{\"t\":\"text\",\"text\":\"false true -2 1.5 3 Bravo alpha charlie echo foxtrot golf hotel table\"}]",
+		 all, all);
+	CHECK_STR(o.text, want);
+	o = run(W("order"), "{\"case\":\"nextloop\"}", 0, false, false, NULL);
+	CHECK_STR(text_of(&o), "20000");
 }
 
 static void limits(void)
@@ -347,6 +425,20 @@ static void limits(void)
 	/* a run that blocks without using CPU: the wall backstop kills it */
 	o = run(W("hello"), NULL, HOOK_BLOCK, false, false, NULL);
 	CHECK_INT(o.status, RUN_TIMEOUT);
+	/*
+	 * a run that asks for files and never reads the answers: Home must not block
+	 * sending them, or the wall backstop would never run. The alarm turns a hang into
+	 * a failure.
+	 */
+	alarm(60);
+	o = run(W("hello"), NULL, HOOK_FLOOD, false, false, NULL);
+	alarm(0);
+	CHECK_INT(o.status, RUN_CRASH);
+	CHECK_STR(o.text, "stopped: it asked for files without reading the answers");
+	/* an allocation that fails outside Lua ends the run as memory, not as a blocked system call */
+	o = run(W("hello"), NULL, HOOK_OOM, false, false, NULL);
+	CHECK_INT(o.status, RUN_MEMORY);
+	CHECK_STR(o.text, "over the memory limit");
 }
 
 /* real failing runs: the last good output stays, the third failure in a row pauses */
@@ -367,11 +459,26 @@ static void pausing(void)
 
 static void seccomp(void)
 {
-	static const int hooks[] = { HOOK_SOCKET, HOOK_EXEC, HOOK_OPEN, HOOK_FORK };
+	static const int hooks[] = { HOOK_SOCKET, HOOK_EXEC, HOOK_OPEN, HOOK_FORK, HOOK_MMAP_EXEC };
 	for (size_t i = 0; i < sizeof hooks / sizeof *hooks; i++) {
 		struct out o = run(W("hello"), NULL, hooks[i], false, false, NULL);
 		CHECK_INT(o.status, RUN_BLOCKED);
 	}
+}
+
+/* Home's side of the boundary: raw messages a compromised run could send */
+static void boundary(void)
+{
+	struct out o = run(W("hello"), NULL, HOOK_RAW_JSON, false, false, NULL);
+	CHECK_INT(o.status, RUN_ERROR);
+	CHECK_STR(o.text, "invalid output: expected key at byte 1");
+	o = run(W("hello"), NULL, HOOK_RAW_DESC, false, false, NULL);
+	CHECK_INT(o.status, RUN_ERROR);
+	CHECK_STR(o.text, "invalid output: render must return a list of ui primitives");
+	/* cut to Home's buffer, "[]" and spaces would pass as JSON: the length decides */
+	o = run(W("hello"), NULL, HOOK_RAW_BIG, false, false, NULL);
+	CHECK_INT(o.status, RUN_ERROR);
+	CHECK_STR(o.text, "invalid output: the description is too large");
 }
 
 static void outputs(void)
@@ -395,6 +502,12 @@ static void outputs(void)
 		{ "error", "widget.lua:8: boom" },
 		{ "errtable", "error (not a string)" },
 		{ "imgfile", "invalid output: ui.image: /etc/hostname is not in the widget's reads" },
+		/* 3000 references to one 1 MB string: copied out of Lua with bounds, not in full */
+		{ "bigstrings", "the description is too large" },
+		/* more items than the walk counts: too large, not mixed */
+		{ "biglist", "the description is too large" },
+		/* the copy keeps only the start of a long string, but not valid UTF-8 past it still fails */
+		{ "badtail", "ui.text: the text is not valid UTF-8" },
 	};
 	for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
 		char props[64];
@@ -403,6 +516,26 @@ static void outputs(void)
 		CHECK_INT(o.status, RUN_ERROR);
 		CHECK_STR(o.text, bad[i].msg);
 	}
+
+	/*
+	 * a long error message and a long print line are cut at a character boundary, on
+	 * both sides, not dropped as invalid UTF-8
+	 */
+	struct out le = run(W("badout"), "{\"case\":\"longerror\"}", 0, false, false, NULL);
+	CHECK_INT(le.status, RUN_ERROR);
+	CHECK(!strncmp(le.text, "widget.lua:", 11) && strlen(le.text) > 500 && utf8_valid(le.text, strlen(le.text)));
+	struct out lp = run(W("badout"), "{\"case\":\"longprint\"}", 0, false, false, NULL);
+	CHECK_INT(lp.nlog, 1);
+	CHECK_INT(strlen(lp.log0), 298); /* "x" and 99 characters of 3 bytes: the 100th would pass 300 */
+	CHECK(utf8_valid(lp.log0, strlen(lp.log0)));
+
+	/* longer text is cut at a character boundary, as before the copy was bounded */
+	struct out l = run(W("badout"), "{\"case\":\"longtext\"}", 0, false, false, NULL);
+	char want[300] = "[{\"t\":\"text\",\"text\":\"";
+	for (int i = 0; i < 100; i++)
+		strcat(want, "\u00e9");
+	strcat(want, "\"}]");
+	CHECK_STR(l.text, want);
 
 	/* a settings script: rows carry ui.set and the current choice */
 	const char *apps = "{\"categories\":[{\"name\":\"Games\",\"count\":3},{\"name\":\"Office\",\"count\":5}]}";
@@ -460,12 +593,15 @@ int main(void)
 	}
 	setup_home();
 	files();
+	home_is_root();
+	no_proc();
 	places();
 	data_files();
 	environment();
 	limits();
 	seccomp();
 	pausing();
+	boundary();
 	outputs();
 	stepping();
 	zygote_stop(&z);

@@ -83,8 +83,7 @@ static bool expand(const char *home, const struct places *pl, const char *req, c
 	}
 	if (w < 0 || (size_t)w >= outlen)
 		return false;
-	if (dir && !strcmp(out, "/"))
-		return true; /* "~/" with HOME=/ */
+	/* "~/" with HOME=/ is "/": like "/" itself, it covers nothing (lexical_ok refuses it) */
 	return lexical_ok(out, dir);
 }
 
@@ -214,6 +213,21 @@ static int open_beneath(int dirfd, const char *rel, bool force_fallback)
 	return open_beneath_walk(dirfd, rel);
 }
 
+/*
+ * True unless the open fd's real path is known and outside /proc, /sys, /dev and /run.
+ * Without /proc the real path can't be read, and the read is refused.
+ */
+static bool in_system_area(const struct broker *b, int fd)
+{
+	char fdp[64], real[4096];
+	snprintf(fdp, sizeof fdp, b->test_no_proc ? "/nonexistent/%d" : "/proc/self/fd/%d", fd);
+	ssize_t rl = readlink(fdp, real, sizeof real - 1);
+	if (rl <= 0)
+		return true;
+	real[rl] = 0;
+	return path_forbidden_root(real);
+}
+
 static void record(struct broker *b, const char *abs)
 {
 	for (size_t i = 0; i < b->nfiles; i++)
@@ -258,22 +272,22 @@ int broker_open(struct broker *b, const char *req, long long *size)
 		return -1;
 	}
 	/* wherever the directory really is, it must not be a system area */
-	char fdp[64], real[4096];
-	snprintf(fdp, sizeof fdp, "/proc/self/fd/%d", dfd);
-	ssize_t rl = readlink(fdp, real, sizeof real - 1);
-	if (rl > 0) {
-		real[rl] = 0;
-		if (path_forbidden_root(real)) {
-			close(dfd);
-			errno = EACCES;
-			return -1;
-		}
+	if (in_system_area(b, dfd)) {
+		close(dfd);
+		errno = EACCES;
+		return -1;
 	}
 	int fd = open_beneath(dfd, rel, b->force_fallback);
 	int e = errno;
 	close(dfd);
 	if (fd < 0) {
 		errno = e;
+		return -1;
+	}
+	/* nor the file: a second line behind the directory's check, should a read ever cover "/" */
+	if (in_system_area(b, fd)) {
+		close(fd);
+		errno = EACCES;
 		return -1;
 	}
 	struct stat st;

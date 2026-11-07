@@ -8,6 +8,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -29,6 +30,14 @@
 
 #define MAX_DESC_DEPTH 16
 #define MAX_DESC_NODES 4000
+/*
+ * The returned description is copied out of Lua with bounds, so the copy can't outgrow
+ * the run's memory. The normalizer keeps at most 200 bytes of any text and refuses
+ * anything longer than 4200 bytes (an image source), so past MAX_DESC_STR bytes only
+ * whether the rest of a string is valid UTF-8 can change the outcome.
+ */
+#define MAX_DESC_STR 8192
+#define MAX_DESC_TEXT (256 * 1024) /* all strings and field names together */
 #define MAX_DATA_DEPTH 64
 #define MAX_DATA_NODES 200000
 
@@ -57,8 +66,7 @@ static void send_tagged(char tag, char sub, const char *s, size_t n)
 {
 	char m[1024];
 	size_t h = sub ? 2 : 1;
-	if (n > sizeof m - h)
-		n = sizeof m - h;
+	n = utf8_cut(s, n, sizeof m - h); /* Home drops a message that isn't valid UTF-8 */
 	m[0] = tag;
 	if (sub)
 		m[1] = sub;
@@ -71,6 +79,12 @@ static void die(char kind, const char *msg)
 {
 	send_tagged(MSG_ERROR, kind, msg, strlen(msg));
 	_exit(kind == ERR_SCRIPT ? 2 : kind == ERR_TIME ? 4 : 3);
+}
+
+/* value.c's allocation failure: over the memory limit, not abort() (which the filter forbids) */
+static void out_of_memory(void)
+{
+	die(ERR_MEMORY, "over the memory limit");
 }
 
 /* ---- limits ---- */
@@ -242,11 +256,16 @@ static int l_read(lua_State *L)
 	return 1;
 }
 
+/*
+ * Copying a data file's value from its state into the widget's. The data state never
+ * allocates here: it has no protected call left to catch a failure, and an unprotected
+ * one panics. The map of tables already copied lives in the widget's state, keyed by
+ * the source table's address, and the copy runs under a protected call there.
+ */
 struct copy {
 	lua_State *src, *dst;
-	int seen_src, seen_dst; /* absolute indices of the table maps */
+	int seen; /* index in dst of the map: source table (light userdata) -> its copy */
 	long nodes;
-	int next_id;
 	const char *err;
 };
 
@@ -298,22 +317,16 @@ static bool copy_value(struct copy *c, int si, int depth)
 	}
 	si = lua_absindex(s, si);
 	/* a table seen before (shared or cyclic) maps to the same copy */
-	lua_pushvalue(s, si);
-	if (lua_rawget(s, c->seen_src) == LUA_TNUMBER) {
-		lua_Integer id = lua_tointeger(s, -1);
-		lua_pop(s, 1);
-		lua_rawgeti(d, c->seen_dst, id);
+	void *key = (void *)lua_topointer(s, si);
+	lua_pushlightuserdata(d, key);
+	if (lua_rawget(d, c->seen) == LUA_TTABLE)
 		return true;
-	}
-	lua_pop(s, 1);
-	int id = ++c->next_id;
-	lua_pushvalue(s, si);
-	lua_pushinteger(s, id);
-	lua_rawset(s, c->seen_src);
+	lua_pop(d, 1);
 	lua_newtable(d);
 	int di = lua_gettop(d);
+	lua_pushlightuserdata(d, key);
 	lua_pushvalue(d, di);
-	lua_rawseti(d, c->seen_dst, id);
+	lua_rawset(d, c->seen);
 	lua_pushnil(s);
 	while (lua_next(s, si)) { /* raw traversal: no metatables exist in the data state */
 		if (copy_key_ok(s, -2)) {
@@ -329,6 +342,15 @@ static bool copy_value(struct copy *c, int si, int depth)
 	return true;
 }
 
+/* Runs in the widget's state: arg 1 is the struct copy; returns the copy, or nothing with c->err set. */
+static int copy_protected(lua_State *L)
+{
+	struct copy *c = lua_touserdata(L, 1);
+	lua_newtable(L);
+	c->seen = lua_gettop(L);
+	return copy_value(c, -1, 0) ? 1 : 0;
+}
+
 static struct cap dcap;
 
 static void data_hook(lua_State *L, lua_Debug *ar)
@@ -337,6 +359,13 @@ static void data_hook(lua_State *L, lua_Debug *ar)
 	(void)ar;
 	if (past_deadline())
 		die(ERR_TIME, "over the time limit (reading a data file)");
+}
+
+/* The data state's unprotected steps are a few small allocations before its chunk runs. */
+static int data_panic(lua_State *L)
+{
+	(void)L;
+	die(ERR_MEMORY, "over the memory limit (reading a data file)");
 }
 
 static int l_load_lua(lua_State *L)
@@ -357,6 +386,7 @@ static int l_load_lua(lua_State *L)
 		free(b);
 		return luaL_error(L, "not enough memory");
 	}
+	lua_atpanic(D, data_panic);
 	lua_sethook(D, data_hook, LUA_MASKCOUNT, 1000);
 	/* KOReader writes infinities and NaN with tostring(): inf, -inf, nan, -nan */
 	lua_newtable(D);
@@ -373,24 +403,29 @@ static int l_load_lua(lua_State *L)
 		st = lua_pcall(D, 0, 1, 0);
 	}
 	if (st != LUA_OK) {
-		const char *e = dcap.hit ? "data file too large" : lua_tostring(D, -1);
+		/* not lua_tostring on a non-string: converting it would allocate in D */
+		const char *e = dcap.hit ? "data file too large" : lua_type(D, -1) == LUA_TSTRING ? lua_tostring(D, -1) : "error";
 		lua_pushnil(L);
-		lua_pushfstring(L, "%s: %s", path, e ? e : "error");
+		lua_pushfstring(L, "%s: %s", path, e);
 		lua_close(D);
 		return 2;
 	}
-	lua_newtable(D);
-	int seen_src = lua_gettop(D);
-	lua_newtable(L);
-	int seen_dst = lua_gettop(L);
-	struct copy c = { D, L, seen_src, seen_dst, 0, 0, NULL };
-	if (!copy_value(&c, -2, 0)) {
-		const char *e = c.err;
-		lua_close(D);
-		return luaL_error(L, "%s: %s", path, e);
-	}
+	struct copy c = { D, L, 0, 0, NULL };
+	lua_pushcfunction(L, copy_protected);
+	lua_pushlightuserdata(L, &c);
+	st = lua_pcall(L, 1, 1, 0);
 	lua_close(D);
-	lua_remove(L, seen_dst);
+	if (st != LUA_OK) {
+		/* the copy didn't fit in the widget's own memory */
+		if (wcap.hit)
+			die(ERR_MEMORY, "over the memory limit");
+		return lua_error(L);
+	}
+	if (c.err) {
+		lua_pushnil(L);
+		lua_pushfstring(L, "%s: %s", path, c.err);
+		return 2;
+	}
 	return 1;
 }
 
@@ -429,8 +464,208 @@ static int l_print(lua_State *L)
 	lua_concat(L, n ? 2 * n - 1 : 0);
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
-	send_tagged(MSG_PRINT, 0, s, len > 300 ? 300 : len);
+	send_tagged(MSG_PRINT, 0, s, utf8_cut(s, len, 300));
 	return 0;
+}
+
+/* ---- pairs and next in a fixed order ---- */
+
+/*
+ * Lua seeds its string hashing from the clock, so its own pairs() order changes from run
+ * to run, and output built from it would too. The widget's pairs and next walk keys in
+ * one order instead: booleans (false first), numbers ascending, strings bytewise. Keys of
+ * other types (tables, functions) can't be ordered; they come last, in the table's own
+ * order.
+ */
+static int key_rank(lua_State *L, int i)
+{
+	switch (lua_type(L, i)) {
+	case LUA_TBOOLEAN: return 0;
+	case LUA_TNUMBER: return 1;
+	case LUA_TSTRING: return 2;
+	default: return 3;
+	}
+}
+
+/* -1, 0 or 1; 0 for two keys of the last rank */
+static int key_cmp(lua_State *L, int a, int b)
+{
+	int ra = key_rank(L, a), rb = key_rank(L, b);
+	if (ra != rb)
+		return ra < rb ? -1 : 1;
+	switch (ra) {
+	case 0:
+		return lua_toboolean(L, a) - lua_toboolean(L, b);
+	case 1: /* numbers have no metamethods: this never runs Lua code or raises */
+		return lua_compare(L, a, b, LUA_OPLT) ? -1 : lua_compare(L, b, a, LUA_OPLT) ? 1 : 0;
+	case 2: {
+		size_t na, nb;
+		const char *sa = lua_tolstring(L, a, &na), *sb = lua_tolstring(L, b, &nb);
+		int c = memcmp(sa, sb, na < nb ? na : nb);
+		return c ? (c < 0 ? -1 : 1) : (na > nb) - (na < nb);
+	}
+	default:
+		return 0;
+	}
+}
+
+static lua_State *sort_L;
+static int sort_keys;
+
+/* qsort over positions in the keys table; equal ranks keep the table's own order */
+static int sort_cmp(const void *pa, const void *pb)
+{
+	lua_Integer a = *(const lua_Integer *)pa, b = *(const lua_Integer *)pb;
+	lua_rawgeti(sort_L, sort_keys, a);
+	lua_rawgeti(sort_L, sort_keys, b);
+	int r = key_cmp(sort_L, lua_absindex(sort_L, -2), lua_absindex(sort_L, -1));
+	lua_pop(sort_L, 2);
+	return r ? r : (a > b) - (a < b);
+}
+
+/* upvalue 1: the sorted keys, upvalue 2: the next position; arg 1: the table */
+static int sorted_iter(lua_State *L)
+{
+	lua_Integer i = lua_tointeger(L, lua_upvalueindex(2));
+	while (lua_rawgeti(L, lua_upvalueindex(1), i++) != LUA_TNIL) {
+		lua_pushvalue(L, -1);
+		if (lua_rawget(L, 1) != LUA_TNIL) {
+			lua_pushinteger(L, i);
+			lua_replace(L, lua_upvalueindex(2));
+			return 2;
+		}
+		lua_pop(L, 2); /* removed during the loop */
+	}
+	return 0;
+}
+
+/* Pushes the keys of the table at index t, sorted, as a list (a snapshot of them as they are now). */
+static void push_sorted_keys(lua_State *L, int t)
+{
+	luaL_checkstack(L, 6, "sorting keys");
+	lua_newtable(L); /* the keys in the table's own order */
+	int keys = lua_gettop(L);
+	lua_Integer n = 0;
+	lua_pushnil(L);
+	while (lua_next(L, t)) {
+		lua_pop(L, 1);
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, keys, ++n);
+	}
+	lua_Integer *pos = lua_newuserdatauv(L, (size_t)n * sizeof *pos + 1, 0);
+	for (lua_Integer i = 0; i < n; i++)
+		pos[i] = i + 1;
+	sort_L = L;
+	sort_keys = keys;
+	qsort(pos, (size_t)n, sizeof *pos, sort_cmp);
+	lua_createtable(L, n > INT_MAX ? INT_MAX : (int)n, 0);
+	for (lua_Integer i = 0; i < n; i++) {
+		lua_rawgeti(L, keys, pos[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+	lua_replace(L, keys);
+	lua_pop(L, 1);
+}
+
+/* pairs(t): the keys as they are now, sorted once; keys removed during the loop are skipped */
+static int sorted_pairs(lua_State *L)
+{
+	luaL_checktype(L, 1, LUA_TTABLE);
+	lua_settop(L, 1);
+	push_sorted_keys(L, 1);
+	lua_pushinteger(L, 1);
+	lua_pushcclosure(L, sorted_iter, 2);
+	lua_pushvalue(L, 1);
+	lua_pushnil(L);
+	return 3;
+}
+
+/*
+ * next(t, k) in the same order as pairs. A walk's first step scans the table once; from
+ * its second step on, a snapshot like pairs' (kept per table in a weak registry table,
+ * with each key's position) makes each step cheap, so a whole walk costs about what one
+ * pairs does. A new walk (k == nil) drops the table's snapshot.
+ */
+static int next_by_scan(lua_State *L);
+
+static int sorted_next(lua_State *L)
+{
+	luaL_checktype(L, 1, LUA_TTABLE);
+	lua_settop(L, 2);
+	lua_getfield(L, LUA_REGISTRYINDEX, "gh.next"); /* 3: table -> { sorted keys, key -> position } */
+	if (lua_isnil(L, 2)) {
+		lua_pushvalue(L, 1);
+		lua_pushnil(L);
+		lua_rawset(L, 3);
+		lua_settop(L, 2);
+		return next_by_scan(L);
+	}
+	lua_pushvalue(L, 1);
+	if (lua_rawget(L, 3) != LUA_TTABLE) { /* 4 */
+		lua_pop(L, 1);
+		lua_createtable(L, 2, 0);
+		push_sorted_keys(L, 1);
+		lua_rawseti(L, -2, 1);
+		lua_newtable(L);
+		lua_rawgeti(L, -2, 1);
+		for (lua_Integer i = 1; lua_rawgeti(L, -1, i) != LUA_TNIL; i++) {
+			lua_pushinteger(L, i);
+			lua_rawset(L, -4);
+		}
+		lua_pop(L, 2);
+		lua_rawseti(L, -2, 2);
+		lua_pushvalue(L, 1);
+		lua_pushvalue(L, -2);
+		lua_rawset(L, 3);
+	}
+	lua_rawgeti(L, 4, 1); /* 5: sorted keys */
+	lua_rawgeti(L, 4, 2); /* 6: positions */
+	lua_pushvalue(L, 2);
+	if (lua_rawget(L, 6) != LUA_TNUMBER) { /* a key the snapshot doesn't know */
+		lua_settop(L, 2);
+		return next_by_scan(L);
+	}
+	lua_Integer i = lua_tointeger(L, -1) + 1;
+	lua_settop(L, 5);
+	while (lua_rawgeti(L, 5, i++) != LUA_TNIL) {
+		lua_pushvalue(L, -1);
+		if (lua_rawget(L, 1) != LUA_TNIL)
+			return 2;
+		lua_pop(L, 2); /* removed during the walk */
+	}
+	return 1; /* nil: the end */
+}
+
+/* The successor of k by one scan of the table: a walk's first step, or a key no snapshot knows. */
+static int next_by_scan(lua_State *L)
+{
+	if (lua_isnil(L, 2) || key_rank(L, 2) < 3) {
+		lua_pushnil(L); /* 3: the smallest ordered key after k */
+		lua_pushnil(L); /* 4: the scan */
+		while (lua_next(L, 1)) {
+			lua_pop(L, 1);
+			if (key_rank(L, 4) < 3 && (lua_isnil(L, 2) || key_cmp(L, 4, 2) > 0) &&
+			    (lua_isnil(L, 3) || key_cmp(L, 4, 3) < 0)) {
+				lua_pushvalue(L, 4);
+				lua_replace(L, 3);
+			}
+		}
+		if (!lua_isnil(L, 3)) {
+			lua_pushvalue(L, 3);
+			lua_rawget(L, 1);
+			return 2;
+		}
+		/* past the ordered keys: the first of the others */
+		lua_settop(L, 1);
+		lua_pushnil(L);
+	}
+	while (lua_next(L, 1)) {
+		if (key_rank(L, -2) == 3)
+			return 2;
+		lua_pop(L, 1);
+	}
+	lua_pushnil(L);
+	return 1;
 }
 
 /* ---- value <-> Lua ---- */
@@ -463,8 +698,27 @@ static void push_value(lua_State *L, const struct value *v)
 
 struct conv {
 	long nodes;
+	size_t text; /* bytes of strings and field names copied */
 	char err[200];
 };
+
+static struct value *copy_str(const char *s, size_t n, struct conv *c)
+{
+	size_t keep = n;
+	if (n > MAX_DESC_STR)
+		keep = utf8_cut(s, n, MAX_DESC_STR);
+	c->text += keep + 1;
+	if (c->text > MAX_DESC_TEXT) {
+		snprintf(c->err, sizeof c->err, "the description is too large");
+		return NULL;
+	}
+	if (keep == n || utf8_valid(s + keep, n - keep))
+		return v_strn(s, keep);
+	/* the cut-off rest isn't valid UTF-8: one invalid byte keeps it so */
+	struct value *v = v_strn(s, keep + 1);
+	v->u.s.p[keep] = (char)0xff;
+	return v;
+}
 
 /* Raw walk of the returned description: no metamethods, bounded depth and size. */
 static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
@@ -484,7 +738,7 @@ static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
 	case LUA_TSTRING: {
 		size_t n;
 		const char *s = lua_tolstring(L, idx, &n);
-		return v_strn(s, n);
+		return copy_str(s, n, c);
 	}
 	case LUA_TTABLE:
 		break;
@@ -508,6 +762,10 @@ static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
 		lua_pop(L, 1);
 		if (count > MAX_DESC_NODES)
 			break;
+	}
+	if (count > MAX_DESC_NODES) {
+		snprintf(c->err, sizeof c->err, "the description is too large");
+		return NULL;
 	}
 	if (len > 0 && (lua_Unsigned)count == len) {
 		struct value *a = v_arr();
@@ -540,6 +798,7 @@ static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
 			v_free(m);
 			return NULL;
 		}
+		c->text += kn + 1;
 		struct value *x = to_value(L, -1, depth + 1, c);
 		lua_pop(L, 1);
 		if (!x) {
@@ -635,6 +894,17 @@ static void build_env(lua_State *L, const struct value *props, const struct valu
 		lua_getfield(L, G, *n);
 		lua_setfield(L, env, *n);
 	}
+	lua_pushcfunction(L, sorted_pairs);
+	lua_setfield(L, env, "pairs");
+	lua_pushcfunction(L, sorted_next);
+	lua_setfield(L, env, "next");
+	/* next's snapshots, weak on the table so they go when it does */
+	lua_newtable(L);
+	lua_createtable(L, 0, 1);
+	lua_pushliteral(L, "k");
+	lua_setfield(L, -2, "__mode");
+	lua_setmetatable(L, -2);
+	lua_setfield(L, LUA_REGISTRYINDEX, "gh.next");
 	static const char *const libs[] = { "string", "table", "math", "utf8", NULL };
 	for (const char *const *n = libs; *n; n++) {
 		lua_getfield(L, G, *n);
@@ -669,6 +939,14 @@ static void build_env(lua_State *L, const struct value *props, const struct valu
 	/* the real globals stay unreachable: the widget's chunk gets env as _ENV */
 }
 
+/* An error outside any protected call, such as running out of memory while building the environment */
+static int panic(lua_State *L)
+{
+	if (wcap.hit)
+		die(ERR_MEMORY, "over the memory limit");
+	die(ERR_SCRIPT, lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "error");
+}
+
 static int msgh(lua_State *L)
 {
 	if (!lua_isstring(L, 1))
@@ -677,6 +955,8 @@ static int msgh(lua_State *L)
 }
 
 #ifdef GH_TEST_HOOKS
+#include <linux/futex.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 static void test_hook(int hook)
 {
@@ -687,6 +967,30 @@ static void test_hook(int hook)
 	case HOOK_BLOCK: { char c; struct iovec iov = { &c, 1 }; struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
 		recvmsg(sock, &mh, 0); break; }
 	case HOOK_FORK: fork(); break;
+	case HOOK_OOM: v_strn("", (size_t)1 << 40); break; /* fails under RLIMIT_AS before it copies */
+	case HOOK_MMAP_EXEC: mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); break;
+	case HOOK_RAW_JSON: { static const char m[] = "D{not json"; send_msg(m, sizeof m - 1); _exit(0); }
+	case HOOK_RAW_DESC: { static const char m[] = "D{\"t\":\"title\"}"; send_msg(m, sizeof m - 1); _exit(0); }
+	case HOOK_RAW_BIG: {
+		size_t n = DESC_MAX_JSON + 4096;
+		char *m = malloc(n);
+		if (!m)
+			_exit(9);
+		memset(m, ' ', n);
+		memcpy(m, "D[]", 3);
+		send_msg(m, n);
+		_exit(0);
+	}
+	case HOOK_FLOOD: {
+		static const char m[] = "O/nonexistent";
+		struct iovec iov = { (void *)m, sizeof m - 1 };
+		struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+		for (int i = 0; i < 5000; i++)
+			sendmsg(sock, &mh, MSG_NOSIGNAL);
+		int w = 0;
+		syscall(SYS_futex, &w, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0);
+		break;
+	}
 	default: break;
 	}
 }
@@ -695,6 +999,7 @@ static void test_hook(int hook)
 void child_main(int s, const struct run_req *req, size_t len, uint64_t as_limit)
 {
 	sock = s;
+	v_oom = out_of_memory;
 	if (req->magic != REQ_MAGIC ||
 	    len < sizeof *req + (size_t)req->script_len + req->props_len + req->apps_len + req->name_len)
 		_exit(6);
@@ -732,6 +1037,7 @@ void child_main(int s, const struct run_req *req, size_t len, uint64_t as_limit)
 	lua_State *L = lua_newstate(capped_alloc, &wcap);
 	if (!L)
 		die(ERR_MEMORY, "over the memory limit");
+	lua_atpanic(L, panic);
 	lua_sethook(L, hook, LUA_MASKCOUNT, 1000);
 	build_env(L, props, apps, req->now);
 	v_free(props);
@@ -764,7 +1070,7 @@ void child_main(int s, const struct run_req *req, size_t len, uint64_t as_limit)
 		die(ERR_SCRIPT, e ? e : "error");
 	}
 
-	struct conv c = { 0, "" };
+	struct conv c = { 0, 0, "" };
 	struct value *v = to_value(L, -1, 0, &c);
 	if (!v)
 		die(ERR_SCRIPT, c.err);

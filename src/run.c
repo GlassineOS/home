@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,12 +45,27 @@ static long long now_ms(void)
 	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+/* snprintf, cut at a character boundary: a message cut inside one isn't valid UTF-8 */
+static void set_msg(char *dst, size_t dstlen, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static void set_msg(char *dst, size_t dstlen, const char *fmt, ...)
+{
+	char tmp[8192];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+	va_end(ap);
+	size_t len = n < 0 ? 0 : (size_t)n < sizeof tmp ? (size_t)n : sizeof tmp - 1;
+	len = utf8_cut(tmp, len, dstlen - 1);
+	memcpy(dst, tmp, len);
+	dst[len] = 0;
+}
+
 static char *read_script(const char *path, size_t *len, char *err, size_t errlen)
 {
 	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
 	struct stat st;
 	if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size > RUN_MAX_SCRIPT) {
-		snprintf(err, errlen, "%s: %s", path, fd < 0 ? strerror(errno) : "not a regular file of at most 128 KiB");
+		set_msg(err, errlen, "%s: %s", path, fd < 0 ? strerror(errno) : "not a regular file of at most 128 KiB");
 		if (fd >= 0)
 			close(fd);
 		return NULL;
@@ -59,7 +75,7 @@ static char *read_script(const char *path, size_t *len, char *err, size_t errlen
 	close(fd);
 	if (n != st.st_size) {
 		free(b);
-		snprintf(err, errlen, "%s: read failed", path);
+		set_msg(err, errlen, "%s: read failed", path);
 		return NULL;
 	}
 	*len = (size_t)n;
