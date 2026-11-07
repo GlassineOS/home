@@ -270,6 +270,41 @@ static int find_hit(const struct home *h, enum act act, int a, const char *id)
 	return -1;
 }
 
+/* a point of hit i that no later hit covers (a page swap button sits on a peek's edge) */
+static bool hit_point(const struct home *h, int i, double *px, double *py)
+{
+	const struct rect *r = &h->hits[i].r;
+	for (int sy = 1; sy < 8; sy++)
+		for (int sx = 1; sx < 8; sx++) {
+			double x = r->x + r->w * sx / 8, y = r->y + r->h * sy / 8;
+			int top = -1;
+			for (int k = h->nhits - 1; k >= 0 && top < 0; k--) {
+				const struct rect *q = &h->hits[k].r;
+				if (x >= q->x && x < q->x + q->w && y >= q->y && y < q->y + q->h)
+					top = k;
+			}
+			if (top == i) {
+				*px = x;
+				*py = y;
+				return true;
+			}
+		}
+	return false;
+}
+
+static bool tap_index(struct home *h, int i)
+{
+	double x, y;
+	if (!hit_point(h, i, &x, &y)) {
+		fprintf(stderr, "test_home: hit %d is covered\n", i);
+		return false;
+	}
+	home_press(h, x, y);
+	home_release(h, x, y);
+	home_tick(h);
+	return true;
+}
+
 static bool tap(struct home *h, enum act act, int a, const char *id)
 {
 	int i = find_hit(h, act, a, id);
@@ -277,11 +312,7 @@ static bool tap(struct home *h, enum act act, int a, const char *id)
 		fprintf(stderr, "test_home: no hit for act %d (%d, %s)\n", act, a, id ? id : "-");
 		return false;
 	}
-	double x = h->hits[i].r.x + h->hits[i].r.w / 2, y = h->hits[i].r.y + h->hits[i].r.h / 2;
-	home_press(h, x, y);
-	home_release(h, x, y);
-	home_tick(h);
-	return true;
+	return tap_index(h, i);
 }
 
 static bool hold(struct home *h, enum act act, int a, const char *id)
@@ -343,6 +374,210 @@ static void turn_to(struct home *h, int card)
 		h->dirty_now = true;
 		home_paint(h, true);
 	}
+}
+
+
+/* ---- Arrange and the layout file ------------------------------------------------ */
+
+static void conf_path(char *p, size_t n)
+{
+	snprintf(p, n, "%s/home.conf", T);
+}
+
+/* the layout file as "widget:size …" and its uuids in order */
+static void file_layout(char *out, size_t n, char uuids[][37], size_t *nu)
+{
+	struct home_conf c;
+	char err[256], p[2048];
+	conf_path(p, sizeof p);
+	out[0] = 0;
+	if (!conf_load(p, &c, err, sizeof err)) {
+		snprintf(out, n, "unreadable: %s", err);
+		return;
+	}
+	size_t l = 0;
+	for (size_t i = 0; i < c.n; i++) {
+		const char *w = c.w[i].widget;
+		char sz[8];
+		if (c.w[i].size == SIZE_HALF)
+			snprintf(sz, sizeof sz, "h");
+		else if (c.w[i].size == SIZE_WIDE)
+			snprintf(sz, sizeof sz, "w");
+		else
+			snprintf(sz, sizeof sz, "%d", c.w[i].size);
+		l += (size_t)snprintf(out + l, n - l, "%s%s:%s", i ? " " : "", strchr(w, '/') + 1, sz);
+		if (uuids && i < 32)
+			memcpy(uuids[i], c.w[i].uuid, 37);
+	}
+	if (nu)
+		*nu = c.n;
+	conf_free(&c);
+}
+
+/* "00…0N" for CONF's widgets, "new" for one Home made */
+static void uuid_tags(char *out, size_t n)
+{
+	char u[32][37], lay[2048];
+	size_t nu = 0, l = 0;
+	file_layout(lay, sizeof lay, u, &nu);
+	out[0] = 0;
+	for (size_t i = 0; i < nu && i < 32; i++) {
+		bool fixed = !strncmp(u[i], "00000000-0000-4000-8000-00000000000", 35);
+		if (fixed)
+			l += (size_t)snprintf(out + l, n - l, "%s%c", i ? " " : "", u[i][35]);
+		else
+			l += (size_t)snprintf(out + l, n - l, "%snew", i ? " " : "");
+	}
+}
+
+/*
+ * The last commit's rectangles, each named by the region it is: the smallest region
+ * whose rectangle it covers, grown by at most a tile of changed pixels beyond it
+ * ("card3", "page", "header", "sheet"); "all" for the whole canvas.
+ */
+static void damage_names(const struct home *h, char *out, size_t n)
+{
+	char names[MAX_DAMAGE][24];
+	int k = 0;
+	for (int i = 0; i < last_n; i++) {
+		const struct rect *d = &last_dmg[i];
+		int best = -1;
+		double area = 1e18;
+		if (d->x <= 0 && d->y <= 0 && d->w >= h->W * h->S && d->h >= h->H * h->S) {
+			snprintf(names[k++], 24, "all");
+			continue;
+		}
+		for (int r = 0; r < h->nregions; r++) {
+			struct rect g = h->regions[r].r;
+			double x0 = g.x * h->S, y0 = g.y * h->S, x1 = (g.x + g.w) * h->S, y1 = (g.y + g.h) * h->S;
+			bool covers = d->x <= x0 + 1 && d->y <= y0 + 1 && d->x + d->w >= x1 - 1 && d->y + d->h >= y1 - 1;
+			bool near = d->x >= x0 - 17 && d->y >= y0 - 17 && d->x + d->w <= x1 + 17 && d->y + d->h <= y1 + 17;
+			if (covers && near && g.w * g.h < area) {
+				area = g.w * g.h;
+				best = r;
+			}
+		}
+		if (best < 0) {
+			snprintf(names[k++], 24, "?%.0f,%.0f,%.0fx%.0f", d->x, d->y, d->w, d->h);
+			continue;
+		}
+		const struct region *g = &h->regions[best];
+		static const char *const kinds[] = { "header", "page", "card", "slot", "hint", "sheet" };
+		if (g->kind == R_CARD || g->kind == R_SLOT)
+			snprintf(names[k++], 24, "%s%d", kinds[g->kind], g->card);
+		else
+			snprintf(names[k++], 24, "%s", kinds[g->kind]);
+	}
+	/* sorted, so a check doesn't depend on the scan order */
+	for (int i = 0; i < k; i++)
+		for (int j = i + 1; j < k; j++)
+			if (strcmp(names[j], names[i]) < 0) {
+				char t[24];
+				memcpy(t, names[i], 24);
+				memcpy(names[i], names[j], 24);
+				memcpy(names[j], t, 24);
+			}
+	size_t l = 0;
+	out[0] = 0;
+	for (int i = 0; i < k; i++)
+		l += (size_t)snprintf(out + l, n - l, "%s%s", i ? " " : "", names[i]);
+}
+
+/* A tap that must be one action: one commit, its damage named; then the event loop runs dry. */
+static int commits_before;
+
+/* runs until nothing is left to paint: widget runs, images (requested when a card is laid out) */
+static void settle(struct home *h)
+{
+	for (int i = 0; i < 6; i++) {
+		loop(h, true, 0, -1, NULL);
+		int c = h->commits;
+		home_paint(h, true);
+		if (c == h->commits && !busy(h, true))
+			break;
+	}
+}
+
+static bool act(struct home *h, enum act a, int arg, char *dmg, size_t n)
+{
+	settle(h);
+	commits_before = h->commits;
+	last_n = 0;
+	bool ok = tap(h, a, arg, NULL);
+	CHECK_INT(h->commits - commits_before, 1);
+	damage_names(h, dmg, n);
+	return ok;
+}
+
+static int hit_count(const struct home *h, enum act a)
+{
+	int n = 0;
+	for (int i = 0; i < h->nhits; i++)
+		n += h->hits[i].act == a;
+	return n;
+}
+
+static void show_page(struct home *h, int page)
+{
+	h->page = page;
+	h->dirty_now = true;
+	home_paint(h, true);
+}
+
+/* turns sheet pages until a gallery row's Add shows; false if it never does */
+static bool gallery_find(struct home *h, int row)
+{
+	for (int p = 0; p < 8; p++) {
+		if (find_hit(h, A_GAL_ADD, row, NULL) >= 0)
+			return true;
+		if (find_hit(h, A_SHEET_NEXT, -1, NULL) < 0 || !tap(h, A_SHEET_NEXT, -1, NULL))
+			return false;
+	}
+	return false;
+}
+
+static int gallery_row(const struct home *h, const char *ref)
+{
+	for (size_t e = 0; e < h->cat.n; e++)
+		if (!strcmp(h->cat.e[e].ref, ref))
+			return 3 + (int)e;
+	return -1;
+}
+
+static int swaps_refused; /* shared edges where a swap would move a widget to another page */
+
+/* every offered swap is two widgets on this page sharing an edge that pack_can_swap allows, and every such pair is offered */
+static void check_swaps_offered(struct home *h)
+{
+	size_t n = h->conf.n;
+	int *sizes = calloc(n + 1, sizeof *sizes);
+	struct pack_pos *pos = calloc(n + 1, sizeof *pos);
+	for (size_t i = 0; i < n; i++)
+		sizes[i] = h->conf.w[i].size;
+	pack(h->orient, sizes, n, pos);
+	int want = 0;
+	for (size_t a = 0; a < n; a++)
+		for (size_t b = 0; b < n; b++) {
+			if (a == b || pos[a].page != h->page || pos[b].page != h->page)
+				continue;
+			int ax0 = pos[a].lane * 4 + pos[a].col, ax1 = ax0 + pos[a].cols, ay0 = pos[a].row, ay1 = ay0 + pos[a].rows;
+			int bx0 = pos[b].lane * 4 + pos[b].col, bx1 = bx0 + pos[b].cols, by0 = pos[b].row, by1 = by0 + pos[b].rows;
+			int oy0 = ay0 > by0 ? ay0 : by0, oy1 = ay1 < by1 ? ay1 : by1;
+			int ox0 = ax0 > bx0 ? ax0 : bx0, ox1 = ax1 < bx1 ? ax1 : bx1;
+			bool edge = (ax1 == bx0 && oy0 < oy1 ) || (ay1 == by0 && ox0 < ox1);
+			bool can = pack_can_swap(h->orient, sizes, n, a, b);
+			bool shown = false;
+			for (int i = 0; i < h->nhits; i++)
+				shown |= h->hits[i].act == A_SWAP && h->hits[i].a == (int)a && h->hits[i].b == (int)b;
+			if (shown != (edge && can))
+				fprintf(stderr, "test_home: swap %zu-%zu: shown %d, edge %d, can %d\n", a, b, shown, edge, can);
+			CHECK(shown == (edge && can));
+			want += edge && can;
+			swaps_refused += edge && !can;
+		}
+	CHECK_INT(hit_count(h, A_SWAP), want);
+	free(sizes);
+	free(pos);
 }
 
 /* ---- the boards ----------------------------------------------------------------- */
@@ -1188,6 +1423,269 @@ static void image_limits(void)
 	free(g);
 }
 
+/* ---- Arrange by taps and keys, the layout file after each -------------------------- */
+
+#define CHECK_LAYOUT(lay, tags) do { char _l[2048], _u[512]; file_layout(_l, sizeof _l, NULL, NULL); \
+	uuid_tags(_u, sizeof _u); CHECK_STR(_l, lay); CHECK_STR(_u, tags); } while (0)
+
+static bool tap_ab(struct home *h, enum act a, int x, int y)
+{
+	for (int i = 0; i < h->nhits; i++)
+		if (h->hits[i].act == a && h->hits[i].a == x && h->hits[i].b == y)
+			return tap_index(h, i);
+	fprintf(stderr, "test_home: no hit for act %d (%d, %d)\n", a, x, y);
+	return false;
+}
+
+/* the page that shows card i (Arrange) */
+static void page_with(struct home *h, int card)
+{
+	for (int p = 0; p < 6 && !card_on_page(h, card); p++)
+		show_page(h, p);
+}
+
+/* removes the card at i, as Arrange's × does */
+static void remove_card(struct home *h, int i, char *d, size_t n)
+{
+	page_with(h, i);
+	CHECK(act(h, A_CTL_REMOVE, i, d, n));
+	CHECK(strchr(d, '?') == NULL);
+}
+
+/* Add widget's card, then the gallery row's Add */
+static void add_from_gallery(struct home *h, int row, char *d, size_t n)
+{
+	for (int p = 0; p < 6 && find_hit(h, A_ADD_CARD, -1, NULL) < 0; p++)
+		show_page(h, p);
+	CHECK(act(h, A_ADD_CARD, -1, d, n));
+	CHECK(h->sheet == SHEET_GALLERY);
+	CHECK(gallery_find(h, row));
+	CHECK(act(h, A_GAL_ADD, row, d, n));
+	CHECK(strchr(d, '?') == NULL);
+}
+
+static const struct value *edit_row(const struct card *c, const char *label, int *item, int *row)
+{
+	const struct value *dsc = c->edit_desc;
+	for (size_t i = 0; dsc && i < dsc->u.a.n; i++) {
+		const struct value *rows = v_map_get(dsc->u.a.v[i], "rows");
+		for (size_t k = 0; rows && k < rows->u.a.n; k++) {
+			const struct value *lb = v_map_get(rows->u.a.v[k], "label");
+			if (lb && lb->t == V_STR && !strcmp(lb->u.s.p, label)) {
+				*item = (int)i;
+				*row = (int)k;
+				return rows->u.a.v[k];
+			}
+		}
+	}
+	return NULL;
+}
+
+static const char *saved_prop(int idx, const char *key, char *buf, size_t n)
+{
+	struct home_conf c;
+	char err[256], p[2048];
+	conf_path(p, sizeof p);
+	buf[0] = 0;
+	if (conf_load(p, &c, err, sizeof err) && (size_t)idx < c.n) {
+		const struct value *v = v_map_get(c.w[idx].props, key);
+		if (v && v->t == V_STR)
+			snprintf(buf, n, "%s", v->u.s.p);
+	}
+	conf_free(&c);
+	return buf;
+}
+
+static void arrange(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	struct home h;
+	struct home_io io = { .commit = on_commit };
+	home_init(&h, z, &io);
+	ui_draw_init();
+	home_resize(&h, 702, 884, 1);
+	home_appear(&h);
+	loop(&h, true, 0, -1, NULL);
+	home_paint(&h, true);
+	char d[512], b[64];
+	const char *L0 = "reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h sky:h all-apps:3 "
+			 "app-category:2 photo-frame:w";
+
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	CHECK(h.edit);
+	CHECK(strchr(d, '?') == NULL); /* every changed pixel is in a region */
+	for (int p = 0; p < 3; p++) {
+		show_page(&h, p);
+		check_swaps_offered(&h);
+	}
+	show_page(&h, 0);
+
+	/* swap, by keys: Tab to the swap between Notes and Calendar, Enter */
+	int idx[MAX_HITS], target = -1;
+	for (int t = 0; t < 64 && target < 0; t++) {
+		home_key(&h, K_TAB);
+		home_tick(&h);
+		int n = 0;
+		for (int i = 0; i < h.nhits; i++)
+			if (h.hits[i].focus)
+				idx[n++] = i;
+		const struct hit *f = h.focus >= 0 && h.focus < n ? &h.hits[idx[h.focus]] : NULL;
+		if (f && f->act == A_SWAP && f->a == C_NOTES && f->b == C_CAL)
+			target = h.focus;
+	}
+	CHECK(target >= 0);
+	commits_before = h.commits;
+	home_key(&h, K_ENTER);
+	home_tick(&h);
+	CHECK_INT(h.commits - commits_before, 1);
+	damage_names(&h, d, sizeof d);
+	CHECK_STR(d, "card1 card2");
+	CHECK_LAYOUT("reading:w calendar-next:h notes-recent:h favourites:2 package-updates:h sky:h all-apps:3 "
+		     "app-category:2 photo-frame:w", "1 3 2 4 5 6 7 8 9");
+	CHECK_INT(h.focus, target); /* the ring stays */
+	home_key(&h, K_ESCAPE); /* nothing open: Escape leaves Arrange */
+	home_tick(&h);
+	CHECK(!h.edit);
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	/* and back, by a tap */
+	CHECK(act(&h, A_SWAP, C_NOTES, d, sizeof d));
+	CHECK_STR(d, "card1 card2");
+	CHECK_LAYOUT(L0, "1 2 3 4 5 6 7 8 9");
+
+	/* size: an app widget cycles its rows, a script widget its sizes, one with one size has none */
+	static const char *const fav_rows[] = { "3", "5", "1", "2" };
+	for (int i = 0; i < 4; i++) {
+		page_with(&h, C_FAVS);
+		CHECK(act(&h, A_CTL_SIZE, C_FAVS, d, sizeof d));
+		CHECK(strchr(d, '?') == NULL && !strstr(d, "all"));
+		CHECK(card_on_page(&h, C_FAVS)); /* the page follows the card */
+		check_swaps_offered(&h);
+		char want[600];
+		snprintf(want, sizeof want, "reading:w notes-recent:h calendar-next:h favourites:%s package-updates:h sky:h "
+			 "all-apps:3 app-category:2 photo-frame:w", fav_rows[i]);
+		CHECK_LAYOUT(want, "1 2 3 4 5 6 7 8 9");
+	}
+	show_page(&h, 0);
+	CHECK(act(&h, A_CTL_SIZE, C_READING, d, sizeof d));
+	CHECK(strchr(d, '?') == NULL);
+	CHECK_LAYOUT("reading:h notes-recent:h calendar-next:h favourites:2 package-updates:h sky:h all-apps:3 "
+		     "app-category:2 photo-frame:w", "1 2 3 4 5 6 7 8 9");
+	CHECK(act(&h, A_CTL_SIZE, C_READING, d, sizeof d));
+	CHECK_LAYOUT(L0, "1 2 3 4 5 6 7 8 9");
+	page_with(&h, C_SKY);
+	CHECK(card_on_page(&h, C_SKY));
+	CHECK(find_hit(&h, A_CTL_SIZE, C_SKY, NULL) < 0);
+	CHECK(find_hit(&h, A_CTL_SETTINGS, C_SKY, NULL) < 0); /* no settings, no button */
+
+	/* a page swap: page 1's widgets and page 2's trade places; the arranged page stays in view */
+	show_page(&h, 0);
+	CHECK(find_hit(&h, A_PAGE_SWAP, -1, NULL) >= 0);
+	commits_before = h.commits;
+	CHECK(tap_ab(&h, A_PAGE_SWAP, 0, 1));
+	CHECK_INT(h.commits - commits_before, 1);
+	damage_names(&h, d, sizeof d);
+	CHECK(strstr(d, "header") && strstr(d, "page") && !strchr(d, '?')); /* the pager reads 2/3 */
+	CHECK_INT(h.page, 1);
+	CHECK_LAYOUT("all-apps:3 app-category:2 reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h "
+		     "sky:h photo-frame:w", "7 8 1 2 3 4 5 6 9");
+	commits_before = h.commits;
+	CHECK(tap_ab(&h, A_PAGE_SWAP, 1, 0));
+	CHECK_INT(h.commits - commits_before, 1);
+	CHECK_INT(h.page, 0);
+	CHECK_LAYOUT(L0, "1 2 3 4 5 6 7 8 9");
+	/* a peek turns to its page */
+	CHECK(act(&h, A_PEEK, 1, d, sizeof d));
+	CHECK_INT(h.page, 1);
+
+	/* remove: All apps too; the gallery offers it again */
+	remove_card(&h, C_ALL, d, sizeof d);
+	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h sky:h app-category:2 "
+		     "photo-frame:w", "1 2 3 4 5 6 8 9");
+	add_from_gallery(&h, 1, d, sizeof d);
+	CHECK(h.sheet == SHEET_NONE);
+	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h sky:h app-category:2 "
+		     "photo-frame:w all-apps:3", "1 2 3 4 5 6 8 9 new");
+	CHECK(card_on_page(&h, 8)); /* Add turns to the new widget's page */
+	CHECK(act(&h, A_ADD_CARD, -1, d, sizeof d));
+	CHECK(find_hit(&h, A_GAL_ADD, 0, NULL) < 0 && find_hit(&h, A_GAL_ADD, 1, NULL) < 0); /* on Home: a check */
+	CHECK(find_hit(&h, A_GAL_ADD, 2, NULL) >= 0);                                         /* App category: again */
+	home_key(&h, K_ESCAPE);
+	home_tick(&h);
+	CHECK(h.sheet == SHEET_NONE && h.edit);
+
+	/* built in, from an app, your own: removed, then added back from the gallery at the end */
+	static const struct { const char *ref; const char *name; int card; } re[3] = {
+		{ "builtin/reading", "reading:w", 0 }, { "system/photo-frame", "photo-frame:w", 6 }, { "user/sky", "sky:h", 4 },
+	};
+	char lay[2048];
+	for (int i = 0; i < 3; i++) {
+		int row = gallery_row(&h, re[i].ref);
+		CHECK(row >= 3);
+		CHECK_STR(h.conf.w[re[i].card].widget, re[i].ref);
+		remove_card(&h, re[i].card, d, sizeof d);
+		add_from_gallery(&h, row, d, sizeof d);
+		file_layout(lay, sizeof lay, NULL, NULL);
+		const char *last = strrchr(lay, ' ');
+		CHECK_STR(last ? last + 1 : lay, re[i].name);
+		CHECK(card_on_page(&h, (int)h.conf.n - 1));
+	}
+	CHECK_LAYOUT("notes-recent:h calendar-next:h favourites:2 package-updates:h app-category:2 all-apps:3 "
+		     "reading:w photo-frame:w sky:h", "2 3 4 5 8 new new new new");
+
+	/* App category a second time: its settings open at once; Office applies at once, to it alone */
+	add_from_gallery(&h, 2, d, sizeof d);
+	int nc = (int)h.conf.n - 1;
+	CHECK_STR(h.conf.w[nc].widget, "home/app-category");
+	CHECK(h.sheet == SHEET_SETTINGS && h.sheet_card == nc);
+	settle(&h);
+	CHECK(h.cards[nc].edit_desc != NULL);
+	int item = -1, row = -1;
+	const struct value *office = edit_row(&h.cards[nc], "Office", &item, &row);
+	CHECK(office && !v_map_get(office, "selected"));
+	CHECK(find_hit(&h, A_SET_ROW, item, NULL) >= 0);
+	commits_before = h.commits;
+	CHECK(tap_ab(&h, A_SET_ROW, item, row));
+	CHECK_INT(h.commits - commits_before, 1);
+	damage_names(&h, d, sizeof d);
+	char want[64];
+	snprintf(want, sizeof want, "card%d sheet", nc); /* the card behind shows Office; the sheet's subtitle */
+	CHECK_STR(d, want);
+	CHECK_STR(saved_prop(nc, "category", b, sizeof b), "Office");
+	CHECK_STR(saved_prop(4, "category", b, sizeof b), "Games");
+	/* the sheet marks the new choice once its script ran again: one more commit, the sheet only */
+	commits_before = h.commits;
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.commits - commits_before, 1);
+	damage_names(&h, d, sizeof d);
+	CHECK_STR(d, "sheet");
+	office = edit_row(&h.cards[nc], "Office", &item, &row);
+	CHECK(office && v_map_get(office, "selected"));
+	CHECK_LAYOUT("notes-recent:h calendar-next:h favourites:2 package-updates:h app-category:2 all-apps:3 "
+		     "reading:w photo-frame:w sky:h app-category:2", "2 3 4 5 8 new new new new new");
+
+	/* closing the sheet, turning the screen and leaving Arrange write nothing */
+	char before[2048];
+	file_layout(before, sizeof before, NULL, NULL);
+	home_key(&h, K_ESCAPE);
+	home_tick(&h);
+	CHECK(h.sheet == SHEET_NONE && h.edit);
+	/* landscape: two lanes; swaps are offered by the same rule */
+	home_resize(&h, 936, 702, 1);
+	settle(&h);
+	for (int p = 0; p < 4; p++) {
+		show_page(&h, p);
+		check_swaps_offered(&h);
+	}
+	CHECK(swaps_refused > 0); /* some shared edges were rightly not offered */
+	home_key(&h, K_ESCAPE);
+	home_tick(&h);
+	CHECK(!h.edit);
+	file_layout(lay, sizeof lay, NULL, NULL);
+	CHECK_STR(lay, before);
+	home_free(&h);
+}
+
 int main(void)
 {
 	setup();
@@ -1209,6 +1707,7 @@ int main(void)
 	touch_targets(&z);
 	helper_gone(&z2);
 	zygote_stop(&z2);
+	arrange(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

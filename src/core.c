@@ -1067,6 +1067,12 @@ static int region_for(const struct home *h, double cx, double cy)
 {
 	int best = -1;
 	double area = 1e18;
+	/* a sheet lies over the page: what changes inside it is the sheet's, not a card's beneath */
+	for (int i = 0; i < h->nregions; i++) {
+		const struct rect *r = &h->regions[i].r;
+		if (h->regions[i].kind == R_SHEET && cx >= r->x && cx < r->x + r->w && cy >= r->y && cy < r->y + r->h)
+			return i;
+	}
 	for (int i = 0; i < h->nregions; i++) {
 		const struct rect *r = &h->regions[i].r;
 		if (cx >= r->x && cx < r->x + r->w && cy >= r->y && cy < r->y + r->h && r->w * r->h < area) {

@@ -1216,7 +1216,7 @@ void scene_paint(struct home *h, cairo_t *cr)
 	UiFont hf = fpx(&h->v->dateFont, 12.5);
 	double hh = text_h(&hf), hy = h->H - PAD_BOTTOM - hh;
 	ui_text(&G, &hf, hint, h->W / 2.0, hy, 1, h->W - 2 * PAD_X, SUB, NULL);
-	region_add((struct rect){ 0, hy - 2, h->W, hh + 4 }, R_HINT, -1);
+	region_add((struct rect){ 0, hy - 2, h->W, h->H - hy + 2 }, R_HINT, -1); /* to the bottom edge: the glyphs reach below hh */
 	paint_page(top, hy - 12);
 	if (h->sheet != SHEET_NONE) {
 		for (int i = 0; i < h->nhits; i++)
