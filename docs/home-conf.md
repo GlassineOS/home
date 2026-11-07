@@ -115,4 +115,6 @@ nothing new.
   (an editor that renames the old file away before writing the new one is logged once as removed,
   then reloaded).
 - Home itself waits up to 2 seconds for the lock; then it keeps the change and tries again, without
-  waiting, until the lock is free. A writer that holds the lock longer only delays Home's write.
+  waiting, until the lock is free. A writer that holds the lock longer only delays Home's write. A write that fails (a full disk, a read-only folder) is kept the same
+  way and tried again every second, logged once. When Home exits it tries once more, without waiting;
+  a change still waiting then (the lock held, or the write failing again) is lost.

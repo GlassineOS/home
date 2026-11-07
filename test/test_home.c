@@ -2045,6 +2045,87 @@ static void bad_start(struct zygote *z)
 	home_free(&h);
 }
 
+/* both sides changed the same part, and a write that fails */
+static void conf_conflicts(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	struct home h;
+	start(&h, z);
+	char p[2048], d[512], text[8192], tmpdir[2100];
+	conf_path(p, sizeof p);
+	snprintf(tmpdir, sizeof tmpdir, "%s.tmp", p);
+
+	/* both changed the widget list: Settings' (the lock held, nothing read yet) and Home's.
+	 * Home's wins; the favourites Settings changed are kept */
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	int lk = conf_lock(p, -1);
+	CHECK(lk >= 0);
+	CHECK(tap(&h, A_CTL_REMOVE, C_SKY, NULL)); /* Home: no sky; its write waits */
+	CHECK(h.save_pending);
+	struct home_conf c;
+	char err[256];
+	CHECK(conf_load(p, &c, err, sizeof err));
+	conf_remove(&c, C_CAL); /* Settings' file: no calendar, other favourites */
+	free(c.favourites[0]);
+	c.favourites[0] = strdup("foot");
+	size_t len;
+	char *t = conf_format(&c, &len, err, sizeof err);
+	conf_free(&c);
+	outside_write(t, false, NULL);
+	free(t);
+	conf_unlock(lk);
+	for (int i = 0; i < 50 && h.save_pending; i++)
+		loop(&h, true, 100, -1, NULL);
+	CHECK(!h.save_pending);
+	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h all-apps:3 "
+		     "app-category:2 photo-frame:w", "1 2 3 4 5 7 8 9");
+	CHECK(file_has("calendar-next:h") && !file_has("sky:h"));
+	CHECK(home_is_fav(&h, "foot") && !home_is_fav(&h, "koreader"));
+	CHECK(conf_load(p, &c, err, sizeof err));
+	CHECK(c.nfav == 8 && !strcmp(c.favourites[0], "foot"));
+	conf_free(&c);
+	settle(&h);
+
+	/* a write that fails (the temporary file can't be made): the change stays pending, is tried again
+	 * and logged once; Settings' favourites taken in the same call are what Home last read, so
+	 * Settings' next change is not overwritten by them */
+	CHECK_INT(mkdir(tmpdir, 0700), 0);
+	with_favourites("\"firefox-esr\", \"koreader\"", text, sizeof text);
+	outside_write(text, false, NULL);
+	CHECK(tap(&h, A_CTL_REMOVE, C_NOTES, NULL)); /* Home: no notes, before the file's event is read */
+	CHECK(h.save_pending);
+	CHECK(home_is_fav(&h, "firefox-esr") && !home_is_fav(&h, "foot")); /* taken in the same call */
+	CHECK(file_has("notes-recent:h"));                                  /* the failed write left the file */
+	long long fail_until = h.save_retry_ms;
+	CHECK(fail_until > 0);
+	with_favourites("\"org.gnome.Calendar\"", text, sizeof text);
+	outside_write(text, false, NULL);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK(home_is_fav(&h, "org.gnome.Calendar") && !home_is_fav(&h, "firefox-esr"));
+	CHECK(h.save_pending && file_has("notes-recent:h")); /* still can't write */
+	CHECK_INT(rmdir(tmpdir), 0);
+	for (int i = 0; i < 50 && h.save_pending; i++)
+		loop(&h, true, 100, -1, NULL);
+	CHECK(!h.save_pending);
+	CHECK_INT(h.save_retry_ms, 0);
+	CHECK(!file_has("notes-recent:h"));
+	CHECK(conf_load(p, &c, err, sizeof err));
+	CHECK(c.nfav == 1 && !strcmp(c.favourites[0], "org.gnome.Calendar"));
+	conf_free(&c);
+
+	/* a change still waiting when Home exits gets one last try, without waiting for the lock */
+	static const char CAL[] = "00000000-0000-4000-8000-000000000003";
+	lk = conf_lock(p, -1);
+	CHECK(lk >= 0);
+	remove_card(&h, card_of(&h, CAL), d, sizeof d);
+	CHECK(h.save_pending);
+	CHECK(file_has("calendar-next:h"));
+	conf_unlock(lk);
+	home_free(&h);
+	CHECK(!file_has("calendar-next:h"));
+}
+
 int main(void)
 {
 	setup();
@@ -2070,6 +2151,7 @@ int main(void)
 	shared(&z);
 	first_start(&z);
 	bad_start(&z);
+	conf_conflicts(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

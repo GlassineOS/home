@@ -284,29 +284,40 @@ static bool merge_disk(struct home *h, struct home_conf *d, bool *kept_mine)
 	return adopt(h, d, !fav_mine, !w_mine);
 }
 
-/* Writes the layout under the lock, after taking in what changed outside since Home last looked. */
+/*
+ * Writes the layout under the lock, after taking in what changed outside since Home last
+ * looked. When it can't (the lock stays busy, or the write fails), the change stays in
+ * memory and save_pending makes home_tick try again; nothing waits for the lock then.
+ */
 static void save_conf(struct home *h)
 {
 	char err[256];
 	if (h->conf.read_only)
 		return;
-	int lk = conf_lock(h->conf_path, h->save_pending ? 0 : CONF_LOCK_WAIT_MS);
+	bool was_pending = h->save_pending;
+	int lk = conf_lock(h->conf_path, was_pending ? 0 : CONF_LOCK_WAIT_MS);
 	if (lk < 0) {
-		if (!h->save_pending)
+		if (!was_pending)
 			fprintf(stderr, "glassine-home: %s.lock is held; writing the layout when it is free\n", h->conf_path);
 		h->save_pending = true;
 		return;
 	}
 	h->save_pending = false;
-	size_t len;
+	size_t len, dlen;
 	enum conf_state st;
 	struct home_conf d;
-	char *disk = conf_read(h->conf_path, &len, &st, &d, err, sizeof err);
-	if (!same_as_disk(h, disk, len)) {
+	char *disk = conf_read(h->conf_path, &dlen, &st, &d, err, sizeof err);
+	if (!same_as_disk(h, disk, dlen)) {
 		bool mine;
 		if (st == CONF_OK) {
 			if (merge_disk(h, &d, &mine))
 				h->dirty_bg = true;
+			/* what was adopted is now what Home last read: if the write below fails, a later
+			 * outside change must not find Settings' favourites counted as Home's own */
+			free(h->disk_text);
+			h->disk_text = disk;
+			h->disk_len = dlen;
+			disk = NULL;
 		} else if (st != CONF_MISSING) {
 			/* broken, newer or unreadable from outside: Home keeps what it shows and leaves the file */
 			fprintf(stderr, "glassine-home: %s; not writing over it\n", err[0] ? err : h->conf_path);
@@ -314,6 +325,7 @@ static void save_conf(struct home *h)
 			conf_free(&d);
 			free(disk);
 			conf_unlock(lk);
+			h->save_retry_ms = 0;
 			return;
 		}
 	}
@@ -324,9 +336,13 @@ static void save_conf(struct home *h)
 		free(h->disk_text);
 		h->disk_text = text;
 		h->disk_len = len;
+		h->save_retry_ms = 0;
 	} else {
-		fprintf(stderr, "glassine-home: %s\n", err);
+		if (!h->save_retry_ms) /* once per run of failures */
+			fprintf(stderr, "glassine-home: %s; keeping the change and trying again\n", err);
 		free(text);
+		h->save_pending = true;
+		h->save_retry_ms = mono_ms() + CONF_RETRY_MS;
 	}
 	conf_unlock(lk);
 	watch_conf(h);
@@ -558,6 +574,10 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 
 void home_free(struct home *h)
 {
+	/* one last try for a change still waiting for the lock or a failed write (no waiting for
+	 * the lock; if it's held or the write fails again, the change is lost with the process) */
+	if (h->save_pending)
+		save_conf(h);
 	if (h->run) {
 		run_free(h->run);
 		run_result_free(&h->rr);
@@ -1527,9 +1547,13 @@ int home_tick(struct home *h)
 		}
 	}
 	if (h->save_pending) {
-		save_conf(h);
-		if (h->save_pending && wait > 100)
-			wait = 100;
+		if (now >= h->save_retry_ms)
+			save_conf(h);
+		if (h->save_pending) {
+			long long due = h->save_retry_ms > now ? h->save_retry_ms - now : 100;
+			if (wait > due)
+				wait = (int)(due > 100 ? 100 : due);
+		}
 	}
 	start_next_run(h);
 	if (h->run) {

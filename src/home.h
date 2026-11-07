@@ -45,6 +45,7 @@
 /* sources over this many pixels aren't decoded (dashed frame): memory follows the pixels, not the bytes */
 #define IMAGE_MAX_SOURCE_PX (40LL * 1000 * 1000)
 #define CONF_LOCK_WAIT_MS 2000   /* an action waits this long for home.conf.lock, then retries */
+#define CONF_RETRY_MS 1000       /* after a failed write (a full disk, say), the next try */
 
 struct rect { double x, y, w, h; };
 
@@ -126,7 +127,8 @@ struct home {
 	struct home_conf conf;
 	char *disk_text;               /* the file as Home last read or wrote it (NULL: none) */
 	size_t disk_len;
-	bool save_pending;             /* the lock was busy: write again from home_tick */
+	bool save_pending;             /* the lock was busy or the write failed: write again from home_tick */
+	long long save_retry_ms;       /* not before this (mono_ms), after a failed write; 0: it didn't fail */
 	int reloads, conf_refused;     /* outside changes taken; files left alone (tests, logs) */
 	uint64_t refused_hash;         /* the file Home last refused to load, logged once */
 	struct catalog cat;
