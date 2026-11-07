@@ -44,7 +44,12 @@
 #define IMAGE_MAX_BYTES (20 * 1024 * 1024)
 /* sources over this many pixels aren't decoded (dashed frame): memory follows the pixels, not the bytes */
 #define IMAGE_MAX_SOURCE_PX (40LL * 1000 * 1000)
-#define CONF_LOCK_WAIT_MS 2000   /* an action waits this long for home.conf.lock, then retries */
+/*
+ * An action that saves waits this long for home.conf.lock on the UI loop, then keeps the
+ * change and home_tick retries without waiting. Settings holds the lock for the length of
+ * one write, so a longer wait only freezes input behind a stalled holder.
+ */
+#define CONF_LOCK_WAIT_MS 100
 #define CONF_RETRY_MS 1000       /* after a failed write (a full disk, say), the next try */
 
 struct rect { double x, y, w, h; };

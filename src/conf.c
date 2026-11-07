@@ -313,10 +313,15 @@ int conf_lock(const char *path, int timeout_ms)
 			}
 		return fd;
 	}
-	for (int waited = 0;; waited += 5) {
+	struct timespec t0, now;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (;;) {
 		if (!flock(fd, LOCK_EX | LOCK_NB))
 			return fd;
-		if ((errno != EWOULDBLOCK && errno != EINTR) || waited >= timeout_ms)
+		if (errno != EWOULDBLOCK && errno != EINTR)
+			break;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if ((now.tv_sec - t0.tv_sec) * 1000L + (now.tv_nsec - t0.tv_nsec) / 1000000L >= timeout_ms)
 			break;
 		struct timespec ts = { 0, 5 * 1000000L };
 		nanosleep(&ts, NULL);

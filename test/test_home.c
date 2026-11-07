@@ -1809,7 +1809,8 @@ static void shared(struct zygote *z)
 	CHECK(home_is_fav(&h, "org.gnome.Calendar"));
 	conf_unlock(lk);
 
-	/* Home's write waits for Settings' lock, then keeps Settings' favourites and its own change */
+	/* Home's write can't have Settings' lock (held 1.5 s): the change shows at once, input isn't held
+	 * up, and home_tick writes it when the lock is free, keeping Settings' favourites and its own change */
 	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
 	settle(&h);
 	char lockp[2100], tmp[2200];
@@ -1827,7 +1828,7 @@ static void shared(struct zygote *z)
 			_exit(1);
 		if (write(pfd[1], "y", 1) != 1)
 			_exit(1);
-		struct timespec ts = { 0, 700 * 1000000L };
+		struct timespec ts = { 1, 500 * 1000000L };
 		nanosleep(&ts, NULL);
 		int t = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
 		if (t < 0 || write(t, text, tl) != (ssize_t)tl || fsync(t) || close(t) || rename(tmp, p))
@@ -1840,13 +1841,19 @@ static void shared(struct zygote *z)
 	c0 = h.commits;
 	CHECK(tap(&h, A_CTL_REMOVE, C_SKY, NULL));
 	long long waited = ms() - t0;
+	CHECK_INT(h.commits, c0 + 1);
+	CHECK(waited < 1000); /* CONF_LOCK_WAIT_MS, not the holder's 1.5 s (generous: a busy host) */
+	CHECK(h.save_pending);
+	CHECK(strstr(slurp(p), "favourites = [\"foot\", \"koreader\", \"firefox-esr\", \"org.gnome.Calendar\"]") != NULL);
+	for (int i = 0; i < 100 && h.save_pending; i++)
+		loop(&h, true, 100, -1, NULL);
 	int st = -1;
 	waitpid(kid, &st, 0);
 	close(pfd[0]);
 	close(pfd[1]);
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
-	CHECK(waited >= 300);
-	CHECK_INT(h.commits, c0 + 1);
+	CHECK(!h.save_pending);
+	CHECK(ms() - t0 >= 1000); /* it was written after the holder let go, not before */
 	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h all-apps:3 "
 		     "app-category:2 photo-frame:w", "1 2 3 4 5 7 8 9");
 	struct home_conf c;

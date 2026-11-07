@@ -185,8 +185,12 @@ int main(void)
 	char lockp[1100];
 	snprintf(lockp, sizeof lockp, "%s.lock", path);
 	CHECK(access(lockp, F_OK) == 0);
-	CHECK(conf_lock(path, 50) < 0);
 	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	CHECK(conf_lock(path, 50) < 0);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	CHECK((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 >= 50); /* it waited its 50 ms */
+	CHECK(conf_lock(path, 0) < 0);                                                      /* 0: one try */
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	CHECK(conf_save(path, &c, err, sizeof err));
 	clock_gettime(CLOCK_MONOTONIC, &t1);

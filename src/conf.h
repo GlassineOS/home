@@ -70,7 +70,7 @@ bool conf_parse(const char *text, size_t len, struct home_conf *c, char *err, si
 char *conf_format(const struct home_conf *c, size_t *len, char *err, size_t errlen);
 /*
  * The lock every writer takes: an exclusive flock on PATH.lock (created if missing,
- * never deleted). timeout_ms < 0 waits as long as it takes. Returns the fd to pass to
+ * never deleted). timeout_ms < 0 waits as long as it takes; 0 tries once. Returns the fd to pass to
  * conf_unlock, or -1 (errno EWOULDBLOCK when the wait ran out).
  */
 int conf_lock(const char *path, int timeout_ms);
