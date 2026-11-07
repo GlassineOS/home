@@ -88,21 +88,51 @@ static void landscape(void)
 	pack(L, b, 1, pos);
 	CHECK_INT(pos[0].rows, 3);
 
-	/* a tall widget that doesn't fit the lane goes to the next lane; a half backfills */
+	/* a tall widget that doesn't fit the lane goes to the next lane; a half after it
+	 * never goes back to the first lane: that lane is full, so a new page */
 	int c[] = { H, 3, H };
-	CHECK_INT(pack(L, c, N(c), pos), 1);
+	CHECK_INT(pack(L, c, N(c), pos), 2);
 	CHECK_STR(at(1), "0.1.0.0");
+	CHECK_STR(at(2), "1.0.0.0");
+	/* within the lane the flow is in, a half does fill the free half beside an earlier one */
+	int c2[] = { H, W, H };
+	CHECK_INT(pack(L, c2, N(c2), pos), 1);
+	CHECK_STR(at(1), "0.0.1.0");
 	CHECK_STR(at(2), "0.0.0.2");
+
+	/* the home.landscape board: Continue reading (wide), Recent notes + Next (halves),
+	 * Favourite apps (2 rows), Updates + Tonight's sky (halves). The left lane holds the
+	 * first three in rows 1-2; Favourite apps doesn't fit its last row, so it opens the
+	 * right lane, and the pair follows it into the right lane's row 3. The left lane's
+	 * row 3 stays empty. */
+	int board[] = { W, H, H, 2, H, H };
+	CHECK_INT(pack(L, board, N(board), pos), 1);
+	CHECK_STR(at(0), "0.0.0.0");
+	CHECK_STR(at(1), "0.0.1.0");
+	CHECK_STR(at(2), "0.0.1.2");
+	CHECK_STR(at(3), "0.1.0.0");
+	CHECK_STR(at(4), "0.1.2.0");
+	CHECK_STR(at(5), "0.1.2.2");
+	/* swaps on the board keep every widget on its page */
+	CHECK(pack_can_swap(L, board, N(board), 4, 5));
+	CHECK(pack_can_swap(L, board, N(board), 1, 2));
+	CHECK(pack_can_swap(L, board, N(board), 0, 3)); /* reading <-> favourites: still one page */
+	/* portrait is one lane: the same list fills rows 1-5 */
+	CHECK_INT(pack(ORIENT_PORTRAIT, board, N(board), pos), 1);
+	CHECK_STR(at(3), "0.0.2.0");
+	CHECK_STR(at(4), "0.0.4.0");
+	CHECK_STR(at(5), "0.0.4.2");
 
 	/* full-width widgets never move back into gaps: the wide goes to a new page */
 	int d[] = { H, 3, W };
 	CHECK_INT(pack(L, d, N(d), pos), 2);
 	CHECK_STR(at(2), "1.0.0.0");
-	/* but halves do fill the gap in the first lane */
+	/* and neither do halves once the flow is in the next lane: they start a new page */
 	int d2[] = { H, 3, H, H, H };
-	CHECK_INT(pack(L, d2, N(d2), pos), 1);
-	CHECK_STR(at(3), "0.0.1.0");
-	CHECK_STR(at(4), "0.0.1.2");
+	CHECK_INT(pack(L, d2, N(d2), pos), 2);
+	CHECK_STR(at(2), "1.0.0.0");
+	CHECK_STR(at(3), "1.0.0.2");
+	CHECK_STR(at(4), "1.0.1.0");
 
 	/* six wides fill both lanes; the seventh starts page 2 */
 	int e[] = { W, W, W, W, W, W, W };

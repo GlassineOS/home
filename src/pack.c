@@ -38,7 +38,8 @@ int pack(enum orient o, const int *sizes, size_t n, struct pack_pos *out)
 		struct pack_pos *p = &out[i];
 		if (s == SIZE_HALF) {
 			bool placed = false;
-			for (int l = 0; l < g.lanes && !placed; l++)
+			/* the lane the flow has reached, then the next ones; never an earlier lane */
+			for (int l = lane; l < g.lanes && !placed; l++)
 				for (int r = 0; r < g.rows && !placed; r++)
 					for (int h = 0; h < 2 && !placed; h++)
 						if (!(pg.used[l][r] & (1u << h))) {
