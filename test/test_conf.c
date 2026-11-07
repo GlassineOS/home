@@ -171,7 +171,7 @@ int main(void)
 		char ok = fd >= 0 ? 'y' : 'n';
 		if (write(pfd[1], &ok, 1) != 1)
 			_exit(1);
-		usleep(400 * 1000);
+		usleep(700 * 1000);
 		conf_unlock(fd);
 		_exit(0);
 	}
@@ -195,6 +195,18 @@ int main(void)
 	close(pfd[0]);
 	close(pfd[1]);
 	conf_free(&c);
+
+	/* no widget key: never laid out; widget = []: emptied on purpose, and that is what Home writes */
+	write_file("version = 1\nfavourites = [\"a\"]\n");
+	CHECK(conf_load(path, &c, err, sizeof err));
+	CHECK(!c.has_widgets);
+	text = conf_format(&c, &len, err, sizeof err);
+	CHECK(text && strstr(text, "\nwidget = []\n"));
+	conf_free(&c);
+	CHECK(text && conf_parse(text, len, &c, err, sizeof err));
+	CHECK(c.has_widgets && c.n == 0 && c.nfav == 1);
+	conf_free(&c);
+	free(text);
 
 	/* duplicate instance ids are refused */
 	write_file("version = 1\n[[widget]]\nuuid = \"00000000-0000-4000-8000-000000000000\"\nwidget = \"builtin/reading\"\nsize = \"wide\"\n"

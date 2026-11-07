@@ -45,7 +45,10 @@ At the top, before the first `[[widget]]`:
 | `favourites` | array of strings | Desktop ids (`org.gnome.Calendar`, `koreader`), in the user's order. Optional; Home leaves it out when the list is empty, and `[]` means the same. A duplicate is kept as written. |
 
 Then one `[[widget]]` table per widget, in order (at most 256). Pages are never stored: they
-follow from the order and the sizes.
+follow from the order and the sizes. A layout with no widgets is written as `widget = []` (at the
+top, with the other keys): the user removed them all. A file with no `widget` key at all has never
+been laid out, and Home lays it out when it starts (Continue reading, Favourite apps, All apps),
+keeping the file's favourites.
 
 | Key | Type | |
 |---|---|---|
@@ -69,7 +72,7 @@ sees no favourites at all. Write it at the top.
 
 ## Reading it
 
-A missing file is an empty layout. A file Home can't parse when it starts is renamed to
+A missing file: Home lays out a new Home and writes it. A file Home can't parse when it starts is renamed to
 `home.conf.broken` (kept, never deleted) and Home starts empty. A `version` higher than the reader
 knows: the reader uses nothing from it and never writes it.
 
@@ -105,4 +108,10 @@ nothing new.
 - A file from outside that Home can't parse (or a newer `version`) is left alone: Home keeps
   what it shows, writes nothing over it, and logs it once. Its changes in the meantime are written
   when a readable file appears again.
-- A file removed from outside: Home keeps its layout and writes the file again at its next change.
+- A file without a `widget` key from outside (Settings creating one, say after the user deleted
+  it) never empties Home: Home takes its favourites and writes its own widgets back.
+- A file removed from outside: Home keeps its layout and writes the file again at its next change
+  (an editor that renames the old file away before writing the new one is logged once as removed,
+  then reloaded).
+- Home itself waits up to 2 seconds for the lock; then it keeps the change and tries again, without
+  waiting, until the lock is free. A writer that holds the lock longer only delays Home's write.

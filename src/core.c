@@ -275,6 +275,9 @@ static bool merge_disk(struct home *h, struct home_conf *d, bool *kept_mine)
 	if (!h->disk_text || !conf_parse(h->disk_text, h->disk_len, &base, err, sizeof err))
 		memset(&base, 0, sizeof base);
 	bool fav_mine = !conf_favourites_equal(&h->conf, &base), w_mine = !conf_widgets_equal(&h->conf, &base);
+	/* a file without a widget key was never laid out (Settings made it): Home's widgets stay */
+	if (!d->has_widgets && h->conf.n)
+		w_mine = true;
 	conf_free(&base);
 	h->conf.read_only = false;
 	*kept_mine = fav_mine || w_mine;
@@ -366,7 +369,11 @@ static void conf_changed(struct home *h)
 	free(disk);
 }
 
-/* A new Home: Continue reading, Favourite apps and All apps; favourites from the shell's list. */
+/*
+ * A new Home (no file, or one without a widget key, as Settings creates it for its
+ * favourites): Continue reading, Favourite apps and All apps; without favourites in the
+ * file, the shell's old list.
+ */
 static void first_layout(struct home *h)
 {
 	if (catalog_find(&h->cat, "builtin/reading"))
@@ -376,7 +383,7 @@ static void first_layout(struct home *h)
 	char d[1024], p[1100];
 	shell_conf_dir(d, sizeof d);
 	snprintf(p, sizeof p, "%s/favourites", d);
-	FILE *f = fopen(p, "re");
+	FILE *f = h->conf.nfav ? NULL : fopen(p, "re");
 	if (f) {
 		char line[APP_ID_MAX];
 		while (fgets(line, sizeof line, f)) {
@@ -530,17 +537,18 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 		snprintf(h->conf_path, sizeof h->conf_path, "/tmp/glassine-home.conf");
 	struct stat st;
 	bool fresh = stat(h->conf_path, &st) != 0 && errno == ENOENT;
-	if (!conf_load(h->conf_path, &h->conf, err, sizeof err))
+	bool loaded = conf_load(h->conf_path, &h->conf, err, sizeof err);
+	if (!loaded)
 		fprintf(stderr, "glassine-home: %s\n", err);
-	if (fresh) {
-		first_layout(h);
-	} else {
+	if (!fresh) {
 		/* what an outside change is compared with */
 		enum conf_state cs;
 		struct home_conf d;
 		h->disk_text = conf_read(h->conf_path, &h->disk_len, &cs, &d, err, sizeof err);
 		conf_free(&d);
 	}
+	if (fresh || (loaded && !h->conf.has_widgets))
+		first_layout(h);
 	cards_sync(h);
 	h->iq = imgq_start();
 	watch_static(h);

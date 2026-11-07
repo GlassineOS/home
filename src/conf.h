@@ -7,7 +7,7 @@
  *   version = 1
  *   favourites = ["org.example.App"]
  *
- *   [[widget]]
+ *   [[widget]]          # or widget = [] for a layout emptied on purpose
  *   uuid = "0f6d3c1e-...-..."
  *   widget = "builtin/reading"     # source/id: builtin, system, user, or home (native)
  *   size = "wide"                  # "half", "wide", or rows 1, 2, 3, 5 for app widgets
@@ -41,6 +41,7 @@ struct home_conf {
 	char **favourites;
 	size_t nfav;
 	bool read_only;      /* written by a newer Home, or unreadable: never overwrite it */
+	bool has_widgets;    /* the file has a widget key ([[widget]] tables or widget = []) */
 };
 
 /* $XDG_CONFIG_HOME/glassine/home.conf or $HOME/.config/glassine/home.conf */

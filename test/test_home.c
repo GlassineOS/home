@@ -1827,7 +1827,7 @@ static void shared(struct zygote *z)
 			_exit(1);
 		if (write(pfd[1], "y", 1) != 1)
 			_exit(1);
-		struct timespec ts = { 0, 400 * 1000000L };
+		struct timespec ts = { 0, 700 * 1000000L };
 		nanosleep(&ts, NULL);
 		int t = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
 		if (t < 0 || write(t, text, tl) != (ssize_t)tl || fsync(t) || close(t) || rename(tmp, p))
@@ -1933,6 +1933,48 @@ static void shared(struct zygote *z)
 	home_free(&h);
 }
 
+/* ---- a first start on a file Settings made ----------------------------------------- */
+
+static void first_start(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	char p[2048], d[512];
+	conf_path(p, sizeof p);
+	/* Settings' favourites page was used before Home ever ran: only version and favourites */
+	put(p, "version = 1\nfavourites = [\"foot\"]\n");
+	struct home h;
+	struct home_io io = { .commit = on_commit };
+	home_init(&h, z, &io);
+	ui_draw_init();
+	home_resize(&h, 702, 884, 1);
+	home_appear(&h);
+	settle(&h);
+	CHECK_LAYOUT("reading:w favourites:2 all-apps:3", "new new new");
+	CHECK(h.conf.nfav == 1 && home_is_fav(&h, "foot"));
+	CHECK(strstr(slurp(p), "favourites = [\"foot\"]") != NULL);
+
+	/* Settings writes such a file again (say after the user deleted it): Home's widgets stay */
+	outside_write("version = 1\nfavourites = [\"koreader\"]\n", true, NULL);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK(home_is_fav(&h, "koreader") && !home_is_fav(&h, "foot"));
+	CHECK_INT(h.ncards, 3);
+	CHECK_LAYOUT("reading:w favourites:2 all-apps:3", "new new new");
+	CHECK(strstr(slurp(p), "favourites = [\"koreader\"]") != NULL);
+
+	/* everything removed: the file says so, and the next start doesn't lay Home out again */
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	for (int i = 0; i < 3; i++)
+		CHECK(act(&h, A_CTL_REMOVE, 0, d, sizeof d));
+	CHECK_INT(h.ncards, 0);
+	CHECK(strstr(slurp(p), "\nwidget = []\n") != NULL);
+	home_free(&h);
+	home_init(&h, z, &io);
+	CHECK_INT(h.conf.n, 0);
+	CHECK(h.conf.nfav == 1);
+	home_free(&h);
+}
+
 int main(void)
 {
 	setup();
@@ -1956,6 +1998,7 @@ int main(void)
 	zygote_stop(&z2);
 	arrange(&z);
 	shared(&z);
+	first_start(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

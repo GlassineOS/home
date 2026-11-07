@@ -141,6 +141,7 @@ static bool parse(const char *text, size_t len, struct home_conf *c, char *err, 
 		}
 	}
 	const struct value *ws = ok ? v_map_get(root, "widget") : NULL;
+	c->has_widgets = ws != NULL;
 	if (ws && (ws->t != V_ARR || ws->u.a.n > CONF_MAX_WIDGETS)) {
 		snprintf(err, errlen, "widget: must be [[widget]] tables, at most %d", CONF_MAX_WIDGETS);
 		ok = false;
@@ -266,6 +267,8 @@ char *conf_format(const struct home_conf *c, size_t *len, char *err, size_t errl
 		}
 		buf_adds(&b, "]\n");
 	}
+	if (!c->n)
+		buf_adds(&b, "widget = []\n"); /* emptied on purpose; no widget key = never laid out */
 	for (size_t i = 0; i < c->n; i++) {
 		const struct instance *w = &c->w[i];
 		struct value *id = v_str(w->widget);
