@@ -7,8 +7,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      # GlassineOS/ui (the voices and the drawing) is cloned by test/ui.sh at GLASSINE_UI_REF;
+      # home-needs carries what Home added to it (ui_icon_material, ui_hatch) until it merges.
+      # The renders land in out/renders and are kept as an artifact.
       - name: make check on Alpine
+        env:
+          GLASSINE_UI_REF: home-needs
         run: |
-          docker run --rm -v "$PWD":/src -w /src alpine:3.24 sh -euc '
-            apk add -q build-base lua5.4-dev pkgconf linux-headers
+          docker run --rm -e GLASSINE_UI_REF -v "$PWD":/src -w /src alpine:3.24 sh -euc '
+            apk add -q build-base lua5.4-dev pkgconf linux-headers git curl \
+              cairo-dev pango-dev librsvg-dev glib-dev gdk-pixbuf-dev python3 py3-gobject3 py3-cairo gtk+3.0 \
+              font-dejavu font-eb-garamond adwaita-icon-theme wayland-dev wayland-protocols libxkbcommon-dev
             make check'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: renders
+          path: out/renders/
+          if-no-files-found: ignore

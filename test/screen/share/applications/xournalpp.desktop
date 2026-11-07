@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Xournal++
+Icon=com.github.xournalpp.xournalpp
+Exec=xournalpp
+Categories=Office;Graphics;

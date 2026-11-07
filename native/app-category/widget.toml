@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# App category: one of Home's own app widgets (drawn natively, not by widget.lua).
+# This folder holds only what the mechanism every widget uses needs: its settings
+# (props) and widget.edit.lua, the settings sheet. sizes is unused for app widgets.
+name = "App category"
+icon = "category"
+description = "The apps of one category, picked in its settings."
+sizes = ["wide"]
+
+[props]
+category = "Games"

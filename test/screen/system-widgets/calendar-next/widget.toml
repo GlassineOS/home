@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "Next"
+icon = "calendar_month"
+description = "Your next appointment."
+sizes = ["half", "wide"]
+reads = ["~/data/calendar.lua"]
+refresh = { every = "15m" }

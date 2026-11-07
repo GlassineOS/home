@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Mines
+Icon=org.gnome.Mines
+Exec=org.gnome.Mines
+Categories=Game;LogicGame;

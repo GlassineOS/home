@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Files
+Icon=system-file-manager
+Exec=org.gnome.Nautilus
+Categories=System;FileManager;

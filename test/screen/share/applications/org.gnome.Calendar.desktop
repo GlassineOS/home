@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Calendar
+Icon=org.gnome.Calendar
+Exec=org.gnome.Calendar
+Categories=Office;Calendar;

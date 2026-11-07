@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "Recent notes"
+icon = "edit_note"
+description = "Your three newest notes."
+sizes = ["half", "wide"]
+reads = ["~/data/notes.lua"]
+refresh = { on_change = true }

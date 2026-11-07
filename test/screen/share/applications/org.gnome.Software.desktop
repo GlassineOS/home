@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Software
+Icon=system-software-install
+Exec=org.gnome.Software
+Categories=System;PackageManager;

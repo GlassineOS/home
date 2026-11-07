@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "Photo of the day"
+icon = "photo"
+description = "A picture from Pictures/Frame, a new one each day."
+sizes = ["wide"]
+reads = ["~/data/photo.lua", "~/Pictures/Frame/"]
+refresh = { every = "1d" }

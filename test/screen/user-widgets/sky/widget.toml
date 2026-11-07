@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "Tonight's sky"
+icon = "nights_stay"
+description = "The moon and the planets tonight."
+sizes = ["half"]
+reads = ["~/.cache/sky/"]
+refresh = { every = "1h" }
