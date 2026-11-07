@@ -652,6 +652,56 @@ static void in_flight(struct zygote *z)
 	setenv("GLASSINE_HOME_USER_WIDGETS", was, 1);
 }
 
+/* ---- wl.c's frames: a paint while both buffers are busy is owed, and nothing is lost --- */
+
+static void frames_busy(void)
+{
+	struct frames f;
+	frames_init(&f);
+	struct rect a = { 0, 0, 10, 10 }, b = { 20, 20, 5, 5 }, c = { 40, 0, 8, 8 }, d = { 0, 40, 6, 6 };
+	frames_damage(&f, &a, 1);
+	CHECK_INT(frames_pick(&f), 0);
+	CHECK(f.b[0].all); /* never shown: copied whole */
+	frames_shown(&f, 0);
+	frames_damage(&f, &b, 1);
+	CHECK_INT(frames_pick(&f), 1);
+	frames_shown(&f, 1);
+	CHECK(!f.owed);
+
+	/* both with the compositor: two paints wait, nothing is committed */
+	frames_damage(&f, &c, 1);
+	CHECK_INT(frames_pick(&f), -1);
+	CHECK(f.owed);
+	frames_damage(&f, &d, 1);
+	CHECK_INT(frames_pick(&f), -1);
+
+	/* buffer 0 comes back: it copies all it missed (b, c, d), the surface damages
+	 * what changed since the last commit (c, d), and nothing is owed any more */
+	frames_released(&f, 0);
+	CHECK_INT(frames_pick(&f), 0);
+	CHECK(!f.b[0].all);
+	CHECK_INT(f.b[0].ndmg, 3);
+	CHECK(f.b[0].ndmg == 3 && f.b[0].dmg[0].x == 20 && f.b[0].dmg[1].x == 40 && f.b[0].dmg[2].y == 40);
+	CHECK_INT(f.nsdmg, 2);
+	CHECK(f.nsdmg == 2 && f.sdmg[0].x == 40 && f.sdmg[1].y == 40);
+	frames_shown(&f, 0);
+	CHECK(!f.owed);
+	CHECK_INT(f.nsdmg, 0);
+	/* buffer 1, still away, keeps c and d for when it is used next */
+	CHECK_INT(f.b[1].ndmg, 2);
+
+	/* more rectangles than the lists hold: the buffer and the surface go whole */
+	frames_released(&f, 1);
+	struct rect many[MAX_DAMAGE + 1];
+	for (int i = 0; i <= MAX_DAMAGE; i++)
+		many[i] = (struct rect){ i, 0, 1, 1 };
+	frames_damage(&f, many, MAX_DAMAGE + 1);
+	CHECK(f.b[1].all && f.sall);
+	CHECK_INT(frames_pick(&f), 1);
+	frames_shown(&f, 1);
+	CHECK(!f.b[1].all && !f.sall);
+}
+
 /* ---- image limits: a source's pixels, not its bytes, decide what decoding costs ------- */
 
 static long peak_rss_kb(void)
@@ -744,6 +794,7 @@ int main(void)
 	commands(&z);
 	in_flight(&z);
 	image_limits();
+	frames_busy();
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

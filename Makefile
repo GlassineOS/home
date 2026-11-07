@@ -27,8 +27,8 @@ SANDBOX_OBJ := $(SANDBOX:%=$(O)/%.o) $(O)/child.o
 SANDBOX_TEST_OBJ := $(SANDBOX:%=$(O)/%.o) $(O)/child-hooks.o
 TESTS := value pack manifest desc sched conf catalog places sandbox
 
-# the screen: model, scene, images (drawn with GlassineOS/ui)
-SCREEN := apps core scene images
+# the screen: model, scene, images (drawn with GlassineOS/ui), and the frames wl.c commits
+SCREEN := apps core scene images frames
 SCREEN_OBJ := $(SCREEN:%=$(O)/%.o)
 
 ifeq ($(UI_SYSTEM),1)

@@ -211,6 +211,28 @@ long long home_now(const struct home *h);
 bool home_is_fav(const struct home *h, const char *id);
 void home_status(const struct home *h, char *title, size_t tlen, char *sub, size_t slen);
 
+/*
+ * frames.c: the bookkeeping behind wl.c's commits. A paint's damage goes to every
+ * buffer (each copies what changed since it was last shown) and to the surface (what
+ * changed since the last commit). A paint while both buffers are with the compositor
+ * isn't committed then: it is owed, and committed when a buffer comes back.
+ */
+#define FRAME_BUFFERS 2
+struct frames {
+	struct { bool busy; struct rect dmg[MAX_DAMAGE]; int ndmg; bool all; } b[FRAME_BUFFERS];
+	struct rect sdmg[MAX_DAMAGE];
+	int nsdmg;
+	bool sall;
+	bool owed;
+};
+void frames_init(struct frames *f);
+void frames_damage(struct frames *f, const struct rect *r, int n);
+/* A free buffer, or -1: then the frame is owed. */
+int frames_pick(struct frames *f);
+/* Buffer i was committed: it is busy, and nothing is left to copy or damage. */
+void frames_shown(struct frames *f, int i);
+void frames_released(struct frames *f, int i);
+
 /* images.c: a worker thread that prepares image slots */
 struct imgq *imgq_start(void);
 void imgq_stop(struct imgq *q);

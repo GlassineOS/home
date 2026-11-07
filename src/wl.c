@@ -7,7 +7,9 @@
  *
  * Every paint of the core ends in at most one commit: the damaged rectangles are
  * copied from the core's canvas into a free buffer (which also gets what changed
- * since it was last used) and committed together.
+ * since it was last used) and committed together. With both buffers still with the
+ * compositor, the paint is owed (frames.c) and committed from the main loop once one
+ * is released: commit never dispatches events, so no handler runs in a paint.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -32,10 +34,6 @@ struct buffer {
 	void *data;
 	int w, h, stride;
 	size_t size;
-	bool busy;
-	struct rect dmg[MAX_DAMAGE]; /* changed since this buffer was last shown */
-	int ndmg;
-	bool all;
 };
 
 static struct {
@@ -59,7 +57,8 @@ static struct {
 	bool configured, activated, running;
 	double px, py;
 	int touch_id;
-	struct buffer buf[2];
+	struct buffer buf[FRAME_BUFFERS];
+	struct frames f;         /* which buffer is free, what each copies and the surface damages */
 	struct home *h;
 } W = { .out_scale = 1, .touch_id = -1, .running = true };
 
@@ -67,7 +66,7 @@ static struct {
 
 static void buf_release(void *data, struct wl_buffer *b)
 {
-	((struct buffer *)data)->busy = false;
+	frames_released(&W.f, (int)((struct buffer *)data - W.buf));
 }
 static const struct wl_buffer_listener buf_listener = { buf_release };
 
@@ -104,7 +103,6 @@ static bool buf_make(struct buffer *b, int w, int h)
 	wl_shm_pool_destroy(pool);
 	close(fd);
 	wl_buffer_add_listener(b->b, &buf_listener, b);
-	b->all = true;
 	return true;
 }
 
@@ -119,48 +117,46 @@ static void copy_rect(struct buffer *b, const unsigned char *src, int sstride, c
 		memcpy((char *)b->data + (size_t)y * b->stride + x0 * 4, src + (size_t)y * sstride + x0 * 4, (size_t)(x1 - x0) * 4);
 }
 
-static void commit(void *ud, const struct rect *r, int n)
+/* Commits the canvas as it is now into a free buffer; with none free, the frame stays owed. */
+static void present(void)
 {
 	struct home *h = W.h;
 	if (!W.configured || !h->cur)
+		return; /* a new canvas is coming, and its paint damages everything */
+	int i = frames_pick(&W.f);
+	if (i < 0)
 		return;
+	struct buffer *b = &W.buf[i];
 	int dw = cairo_image_surface_get_width(h->cur), dh = cairo_image_surface_get_height(h->cur);
-	struct buffer *b = !W.buf[0].busy ? &W.buf[0] : !W.buf[1].busy ? &W.buf[1] : NULL;
-	if (!b) {
-		/* both with the compositor: wait for one */
-		while (W.buf[0].busy && W.buf[1].busy && wl_display_dispatch(W.d) >= 0)
-			;
-		b = !W.buf[0].busy ? &W.buf[0] : &W.buf[1];
-	}
-	if (b->w != dw || b->h != dh)
+	if (b->w != dw || b->h != dh) {
 		if (!buf_make(b, dw, dh))
 			return;
-	/* every buffer collects what changed while it was away */
-	for (int k = 0; k < 2; k++) {
-		struct buffer *o = &W.buf[k];
-		for (int i = 0; i < n && !o->all; i++) {
-			if (o->ndmg < MAX_DAMAGE)
-				o->dmg[o->ndmg++] = r[i];
-			else
-				o->all = true;
-		}
+		W.f.b[i].all = true;
 	}
 	const unsigned char *src = cairo_image_surface_get_data(h->cur);
 	int sstride = cairo_image_surface_get_stride(h->cur);
-	if (b->all) {
-		struct rect full = { 0, 0, dw, dh };
+	struct rect full = { 0, 0, dw, dh };
+	if (W.f.b[i].all) {
 		copy_rect(b, src, sstride, &full);
 	} else {
-		for (int i = 0; i < b->ndmg; i++)
-			copy_rect(b, src, sstride, &b->dmg[i]);
+		for (int k = 0; k < W.f.b[i].ndmg; k++)
+			copy_rect(b, src, sstride, &W.f.b[i].dmg[k]);
 	}
-	b->all = false;
-	b->ndmg = 0;
 	wl_surface_attach(W.surf, b->b, 0, 0);
-	for (int i = 0; i < n; i++)
-		wl_surface_damage_buffer(W.surf, (int)r[i].x, (int)r[i].y, (int)ceil(r[i].w), (int)ceil(r[i].h));
-	b->busy = true;
+	const struct rect *sd = W.f.sall ? &full : W.f.sdmg;
+	int nsd = W.f.sall ? 1 : W.f.nsdmg;
+	for (int k = 0; k < nsd; k++)
+		wl_surface_damage_buffer(W.surf, (int)sd[k].x, (int)sd[k].y, (int)ceil(sd[k].w), (int)ceil(sd[k].h));
+	frames_shown(&W.f, i);
 	wl_surface_commit(W.surf);
+}
+
+static void commit(void *ud, const struct rect *r, int n)
+{
+	if (!W.configured || !W.h->cur)
+		return;
+	frames_damage(&W.f, r, n);
+	present();
 }
 
 /* ---- size ------------------------------------------------------------------------------- */
@@ -435,6 +431,7 @@ int home_wayland_main(struct zygote *z)
 		return 1;
 	}
 	W.h = &h;
+	frames_init(&W.f);
 	home_init(&h, z, &io);
 	ui_draw_init();
 	W.xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -480,12 +477,14 @@ int home_wayland_main(struct zygote *z)
 			break;
 		if (p[0].revents & (POLLHUP | POLLERR))
 			break;
+		if (W.f.owed)
+			present(); /* a buffer may be back: commit the paint that waited for one */
 		for (int i = 0; r > 0 && i < nf; i++)
 			if (p[1 + i].revents)
 				home_ready(&h, p[1 + i].fd);
 	}
 	home_free(&h);
-	for (int i = 0; i < 2; i++)
+	for (int i = 0; i < FRAME_BUFFERS; i++)
 		wlbuf_free(&W.buf[i]);
 	wl_display_disconnect(W.d);
 	return 0;
