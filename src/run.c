@@ -280,10 +280,14 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 			continue;
 		if (pr <= 0)
 			continue;
-		ssize_t n = recv(sv[0], msg, DESC_MAX_JSON + 15, 0);
+		struct iovec iov = { msg, DESC_MAX_JSON + 15 };
+		struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+		ssize_t n = recvmsg(sv[0], &mh, 0);
 		if (n <= 0)
 			break; /* the child is gone */
 		msg[n] = 0;
+		/* longer than the buffer: a description cut to it could still parse ("[]" and padding) */
+		bool cut = mh.msg_flags & MSG_TRUNC;
 		if (msg[0] == MSG_OPEN) {
 			bool sent = memchr(msg + 1, 0, (size_t)n - 1) ? answer_text(sv[0], "Nd" "not a valid path", 18)
 								     : reply_fd(sv[0], &b, msg + 1);
@@ -297,8 +301,8 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 				r->log[r->nlog++] = strdup(msg + 1);
 		} else if (msg[0] == MSG_DONE && !got_final) {
 			got_final = true;
-			char err[256];
-			struct value *v = v_from_json(msg + 1, (size_t)n - 1, 32, err, sizeof err);
+			char err[256] = "the description is too large";
+			struct value *v = cut ? NULL : v_from_json(msg + 1, (size_t)n - 1, 32, err, sizeof err);
 			struct value *d = v ? desc_normalize(v, o->edit, broker_path_check, &b, err, sizeof err) : NULL;
 			v_free(v);
 			if (!d) {

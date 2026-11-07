@@ -35,6 +35,10 @@ enum {
 	HOOK_FORK = 5,   /* fork() */
 	HOOK_FLOOD = 6,  /* ask for files without reading the answers, then wait without using CPU */
 	HOOK_OOM = 7,    /* an allocation in value.c fails */
+	/* raw messages to Home, in place of a run's output (Home's side of the boundary) */
+	HOOK_RAW_JSON = 8,   /* a D message that isn't JSON */
+	HOOK_RAW_DESC = 9,   /* a D message that is JSON but no description */
+	HOOK_RAW_BIG = 10,   /* a D message of valid JSON padded past Home's buffer */
 };
 
 struct zygote {

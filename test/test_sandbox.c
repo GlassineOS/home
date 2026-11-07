@@ -436,6 +436,21 @@ static void seccomp(void)
 	}
 }
 
+/* Home's side of the boundary: raw messages a compromised run could send */
+static void boundary(void)
+{
+	struct out o = run(W("hello"), NULL, HOOK_RAW_JSON, false, false, NULL);
+	CHECK_INT(o.status, RUN_ERROR);
+	CHECK_STR(o.text, "invalid output: expected key at byte 1");
+	o = run(W("hello"), NULL, HOOK_RAW_DESC, false, false, NULL);
+	CHECK_INT(o.status, RUN_ERROR);
+	CHECK_STR(o.text, "invalid output: render must return a list of ui primitives");
+	/* cut to Home's buffer, "[]" and spaces would pass as JSON: the length decides */
+	o = run(W("hello"), NULL, HOOK_RAW_BIG, false, false, NULL);
+	CHECK_INT(o.status, RUN_ERROR);
+	CHECK_STR(o.text, "invalid output: the description is too large");
+}
+
 static void outputs(void)
 {
 	/* the same inputs give the same bytes */
@@ -513,6 +528,7 @@ int main(void)
 	limits();
 	seccomp();
 	pausing();
+	boundary();
 	outputs();
 	zygote_stop(&z);
 	return t_done("sandbox");

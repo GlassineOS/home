@@ -963,6 +963,18 @@ static void test_hook(int hook)
 		recvmsg(sock, &mh, 0); break; }
 	case HOOK_FORK: fork(); break;
 	case HOOK_OOM: v_strn("", (size_t)1 << 40); break; /* fails under RLIMIT_AS before it copies */
+	case HOOK_RAW_JSON: { static const char m[] = "D{not json"; send_msg(m, sizeof m - 1); _exit(0); }
+	case HOOK_RAW_DESC: { static const char m[] = "D{\"t\":\"title\"}"; send_msg(m, sizeof m - 1); _exit(0); }
+	case HOOK_RAW_BIG: {
+		size_t n = DESC_MAX_JSON + 4096;
+		char *m = malloc(n);
+		if (!m)
+			_exit(9);
+		memset(m, ' ', n);
+		memcpy(m, "D[]", 3);
+		send_msg(m, n);
+		_exit(0);
+	}
 	case HOOK_FLOOD: {
 		static const char m[] = "O/nonexistent";
 		struct iovec iov = { (void *)m, sizeof m - 1 };
