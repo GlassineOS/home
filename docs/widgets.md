@@ -48,6 +48,13 @@ category = "Games"
   together.
 - `props`: strings, integers, floats or booleans. Names are `[a-z_][a-z0-9_]*`, at most 32 of them.
 
+There is no network key: widgets have no network access of any kind.
+
+The file is a strict subset of TOML 1.0: comments, `key = value` with bare or quoted keys, `[table]`
+headers, basic and literal strings (one line), decimal integers and floats, booleans, arrays (may span
+lines) and one-line inline tables. Dotted keys, dates, multi-line strings, hex/octal/binary numbers and
+`inf`/`nan` are errors, as are duplicate and unknown keys. Errors name the line or the key.
+
 ### Places
 
 A read may start with a named place instead of a fixed folder. The one place so far is `{books}`,
@@ -68,13 +75,6 @@ path), missing, itself a link, or really inside `/proc`, `/sys`, `/dev` or `/run
 fail: `ctx.read` and `ctx.load_lua` raise an error for an unset place and return `nil, reason` for a
 missing folder. Home never falls back to a wider folder. A widget may also name paths as
 `{books}/...` in `ctx.read` and `ctx.load_lua`.
-
-There is no network key: widgets have no network access of any kind.
-
-The file is a strict subset of TOML 1.0: comments, `key = value` with bare or quoted keys, `[table]`
-headers, basic and literal strings (one line), decimal integers and floats, booleans, arrays (may span
-lines) and one-line inline tables. Dotted keys, dates, multi-line strings, hex/octal/binary numbers and
-`inf`/`nan` are errors, as are duplicate and unknown keys. Errors name the line or the key.
 
 ## The script
 
@@ -102,8 +102,8 @@ not visited.
 
 | | |
 |---|---|
-| `ctx.read(path)` | The file's contents as a string; `nil, reason` if it doesn't exist or can't be read. Raises an error for a path outside `reads`. At most 2 MB. |
-| `ctx.load_lua(path)` | Evaluates a Lua data file (like KOReader's `history.lua`) in an empty environment and returns its value: tables, strings, numbers, booleans. Functions are dropped. A data file can't reach anything: it has no globals except `inf` and `nan` (KOReader writes those as bare words), no libraries, no string methods. `nil, reason` on a missing or broken file, or one that is too large (over its own 4 MB, or more than 200 000 values) or nested more than 64 deep. The value it returns counts against the widget's own memory. |
+| `ctx.read(path)` | The file's contents as a string; `nil, reason` if it doesn't exist or can't be read. Raises an error for a path outside `reads` (or reached through a link), a file that isn't a regular file or is over 2 MB, and after 64 files in one run. |
+| `ctx.load_lua(path)` | Evaluates a Lua data file (like KOReader's `history.lua`) in an empty environment and returns its value: tables, strings, numbers, booleans. Functions are dropped. A data file can't reach anything: it has no globals except `inf` and `nan` (KOReader writes those as bare words), no libraries, no string methods. `nil, reason` on a missing or broken file, or one that is too large (over its own 4 MB, or more than 200 000 values) or nested more than 64 deep. The value it returns counts against the widget's own memory. Raises an error where `ctx.read` would. |
 | `ctx.sidecar(book)` | The path of a KOReader book's metadata: `/x/Book.epub` → `/x/Book.sdr/metadata.epub.lua`. Reading it needs the book's directory in `reads`, usually through `{books}/`. |
 | `ctx.now` | The time of the run, in seconds since 1970. |
 | `ctx.apps` | App data for Home's own app widgets' settings (for example `categories = { {name=, count=} }`); absent for other widgets. |
