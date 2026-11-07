@@ -39,6 +39,7 @@ enum {
 	HOOK_RAW_JSON = 8,   /* a D message that isn't JSON */
 	HOOK_RAW_DESC = 9,   /* a D message that is JSON but no description */
 	HOOK_RAW_BIG = 10,   /* a D message of valid JSON padded past Home's buffer */
+	HOOK_MMAP_EXEC = 11, /* map executable memory */
 };
 
 struct zygote {

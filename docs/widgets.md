@@ -167,7 +167,7 @@ output changed.
 Home forks a helper at startup; each run is a fresh child of it with one socket. Before any widget
 code runs, the child caps its address space, processes, files and CPU time, and enters a seccomp
 allowlist (reading from fds it was given, writing and messaging on its socket, memory management,
-clocks, exit); any other system call ends it. It never opens a path: `ctx.read` asks Home over the
+clocks, exit); any other system call ends it, and so does asking for executable memory. It never opens a path: `ctx.read` asks Home over the
 socket, Home checks `reads`, opens the file beneath the read's directory without following symlinks
 (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, or an `O_NOFOLLOW` walk where `openat2`
 is missing), refuses non-regular files, and passes the open file back. Home checks the run's

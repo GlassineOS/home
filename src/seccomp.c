@@ -2,13 +2,14 @@
 /*
  * The seccomp allowlist of a widget run. Everything not listed kills the process.
  * The run may only: read from fds it was given, write and send/receive on its socket,
- * close fds, manage memory, read clocks and exit.
+ * close fds, manage memory (never executable), read clocks and exit.
  */
 #include <errno.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <stddef.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 
@@ -27,6 +28,13 @@
 #define KILL BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS)
 /* if nr == n: allow, else fall through */
 #define SYS_ALLOW(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (n), 0, 1), ALLOW
+/* if nr == n: allow unless args[2] (mmap's prot) asks for PROT_EXEC, then kill; else fall through */
+#define SYS_NO_EXEC(n) \
+	BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (n), 0, 4), \
+	BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])), \
+	BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, PROT_EXEC, 0, 1), \
+	KILL, \
+	ALLOW
 /* if nr == n: allow only when args[0] == fd (both halves), else kill */
 #define SYS_ON_FD(n, fd) \
 	BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (n), 0, 6), \
@@ -51,7 +59,8 @@ bool seccomp_install(int sock)
 #endif
 		SYS_ALLOW(__NR_read),
 		SYS_ALLOW(__NR_close),
-		SYS_ALLOW(__NR_mmap),
+		/* no executable memory: mprotect isn't allowed at all, mremap keeps a mapping's protection */
+		SYS_NO_EXEC(__NR_mmap),
 		SYS_ALLOW(__NR_munmap),
 		SYS_ALLOW(__NR_mremap),
 		SYS_ALLOW(__NR_brk),

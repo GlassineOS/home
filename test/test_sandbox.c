@@ -458,7 +458,7 @@ static void pausing(void)
 
 static void seccomp(void)
 {
-	static const int hooks[] = { HOOK_SOCKET, HOOK_EXEC, HOOK_OPEN, HOOK_FORK };
+	static const int hooks[] = { HOOK_SOCKET, HOOK_EXEC, HOOK_OPEN, HOOK_FORK, HOOK_MMAP_EXEC };
 	for (size_t i = 0; i < sizeof hooks / sizeof *hooks; i++) {
 		struct out o = run(W("hello"), NULL, hooks[i], false, false, NULL);
 		CHECK_INT(o.status, RUN_BLOCKED);

@@ -956,6 +956,7 @@ static int msgh(lua_State *L)
 
 #ifdef GH_TEST_HOOKS
 #include <linux/futex.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 static void test_hook(int hook)
 {
@@ -967,6 +968,7 @@ static void test_hook(int hook)
 		recvmsg(sock, &mh, 0); break; }
 	case HOOK_FORK: fork(); break;
 	case HOOK_OOM: v_strn("", (size_t)1 << 40); break; /* fails under RLIMIT_AS before it copies */
+	case HOOK_MMAP_EXEC: mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); break;
 	case HOOK_RAW_JSON: { static const char m[] = "D{not json"; send_msg(m, sizeof m - 1); _exit(0); }
 	case HOOK_RAW_DESC: { static const char m[] = "D{\"t\":\"title\"}"; send_msg(m, sizeof m - 1); _exit(0); }
 	case HOOK_RAW_BIG: {
