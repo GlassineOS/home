@@ -92,6 +92,12 @@ give the same output), `utf8`, `ipairs`, `pairs`, `next`, `type`, `tostring`, `t
 `pcall`, `error`, `assert`, `print` (a log line) and `ui`. Nothing else: no `os`, `io`, `require`,
 `load`, `debug`, `coroutine`, `collectgarbage`, metatables.
 
+`pairs` and `next` visit keys in one fixed order, unlike plain Lua, whose order changes from run to
+run: `false`, `true`, then numbers from lowest to highest, then strings by their bytes (`"Z"` before
+`"a"`), then keys of other types (tables, functions) in no fixed order. Output built from them is
+the same for the same inputs. Keys removed during a loop are skipped; keys added during a loop are
+not visited.
+
 ### ctx
 
 | | |

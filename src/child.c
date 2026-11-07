@@ -8,6 +8,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -468,6 +469,206 @@ static int l_print(lua_State *L)
 	return 0;
 }
 
+/* ---- pairs and next in a fixed order ---- */
+
+/*
+ * Lua seeds its string hashing from the clock, so its own pairs() order changes from run
+ * to run, and output built from it would too. The widget's pairs and next walk keys in
+ * one order instead: booleans (false first), numbers ascending, strings bytewise. Keys of
+ * other types (tables, functions) can't be ordered; they come last, in the table's own
+ * order.
+ */
+static int key_rank(lua_State *L, int i)
+{
+	switch (lua_type(L, i)) {
+	case LUA_TBOOLEAN: return 0;
+	case LUA_TNUMBER: return 1;
+	case LUA_TSTRING: return 2;
+	default: return 3;
+	}
+}
+
+/* -1, 0 or 1; 0 for two keys of the last rank */
+static int key_cmp(lua_State *L, int a, int b)
+{
+	int ra = key_rank(L, a), rb = key_rank(L, b);
+	if (ra != rb)
+		return ra < rb ? -1 : 1;
+	switch (ra) {
+	case 0:
+		return lua_toboolean(L, a) - lua_toboolean(L, b);
+	case 1: /* numbers have no metamethods: this never runs Lua code or raises */
+		return lua_compare(L, a, b, LUA_OPLT) ? -1 : lua_compare(L, b, a, LUA_OPLT) ? 1 : 0;
+	case 2: {
+		size_t na, nb;
+		const char *sa = lua_tolstring(L, a, &na), *sb = lua_tolstring(L, b, &nb);
+		int c = memcmp(sa, sb, na < nb ? na : nb);
+		return c ? (c < 0 ? -1 : 1) : (na > nb) - (na < nb);
+	}
+	default:
+		return 0;
+	}
+}
+
+static lua_State *sort_L;
+static int sort_keys;
+
+/* qsort over positions in the keys table; equal ranks keep the table's own order */
+static int sort_cmp(const void *pa, const void *pb)
+{
+	lua_Integer a = *(const lua_Integer *)pa, b = *(const lua_Integer *)pb;
+	lua_rawgeti(sort_L, sort_keys, a);
+	lua_rawgeti(sort_L, sort_keys, b);
+	int r = key_cmp(sort_L, lua_absindex(sort_L, -2), lua_absindex(sort_L, -1));
+	lua_pop(sort_L, 2);
+	return r ? r : (a > b) - (a < b);
+}
+
+/* upvalue 1: the sorted keys, upvalue 2: the next position; arg 1: the table */
+static int sorted_iter(lua_State *L)
+{
+	lua_Integer i = lua_tointeger(L, lua_upvalueindex(2));
+	while (lua_rawgeti(L, lua_upvalueindex(1), i++) != LUA_TNIL) {
+		lua_pushvalue(L, -1);
+		if (lua_rawget(L, 1) != LUA_TNIL) {
+			lua_pushinteger(L, i);
+			lua_replace(L, lua_upvalueindex(2));
+			return 2;
+		}
+		lua_pop(L, 2); /* removed during the loop */
+	}
+	return 0;
+}
+
+/* Pushes the keys of the table at index t, sorted, as a list (a snapshot of them as they are now). */
+static void push_sorted_keys(lua_State *L, int t)
+{
+	luaL_checkstack(L, 6, "sorting keys");
+	lua_newtable(L); /* the keys in the table's own order */
+	int keys = lua_gettop(L);
+	lua_Integer n = 0;
+	lua_pushnil(L);
+	while (lua_next(L, t)) {
+		lua_pop(L, 1);
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, keys, ++n);
+	}
+	lua_Integer *pos = lua_newuserdatauv(L, (size_t)n * sizeof *pos + 1, 0);
+	for (lua_Integer i = 0; i < n; i++)
+		pos[i] = i + 1;
+	sort_L = L;
+	sort_keys = keys;
+	qsort(pos, (size_t)n, sizeof *pos, sort_cmp);
+	lua_createtable(L, n > INT_MAX ? INT_MAX : (int)n, 0);
+	for (lua_Integer i = 0; i < n; i++) {
+		lua_rawgeti(L, keys, pos[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+	lua_replace(L, keys);
+	lua_pop(L, 1);
+}
+
+/* pairs(t): the keys as they are now, sorted once; keys removed during the loop are skipped */
+static int sorted_pairs(lua_State *L)
+{
+	luaL_checktype(L, 1, LUA_TTABLE);
+	lua_settop(L, 1);
+	push_sorted_keys(L, 1);
+	lua_pushinteger(L, 1);
+	lua_pushcclosure(L, sorted_iter, 2);
+	lua_pushvalue(L, 1);
+	lua_pushnil(L);
+	return 3;
+}
+
+/*
+ * next(t, k) in the same order as pairs. A walk's first step scans the table once; from
+ * its second step on, a snapshot like pairs' (kept per table in a weak registry table,
+ * with each key's position) makes each step cheap, so a whole walk costs about what one
+ * pairs does. A new walk (k == nil) drops the table's snapshot.
+ */
+static int next_by_scan(lua_State *L);
+
+static int sorted_next(lua_State *L)
+{
+	luaL_checktype(L, 1, LUA_TTABLE);
+	lua_settop(L, 2);
+	lua_getfield(L, LUA_REGISTRYINDEX, "gh.next"); /* 3: table -> { sorted keys, key -> position } */
+	if (lua_isnil(L, 2)) {
+		lua_pushvalue(L, 1);
+		lua_pushnil(L);
+		lua_rawset(L, 3);
+		lua_settop(L, 2);
+		return next_by_scan(L);
+	}
+	lua_pushvalue(L, 1);
+	if (lua_rawget(L, 3) != LUA_TTABLE) { /* 4 */
+		lua_pop(L, 1);
+		lua_createtable(L, 2, 0);
+		push_sorted_keys(L, 1);
+		lua_rawseti(L, -2, 1);
+		lua_newtable(L);
+		lua_rawgeti(L, -2, 1);
+		for (lua_Integer i = 1; lua_rawgeti(L, -1, i) != LUA_TNIL; i++) {
+			lua_pushinteger(L, i);
+			lua_rawset(L, -4);
+		}
+		lua_pop(L, 2);
+		lua_rawseti(L, -2, 2);
+		lua_pushvalue(L, 1);
+		lua_pushvalue(L, -2);
+		lua_rawset(L, 3);
+	}
+	lua_rawgeti(L, 4, 1); /* 5: sorted keys */
+	lua_rawgeti(L, 4, 2); /* 6: positions */
+	lua_pushvalue(L, 2);
+	if (lua_rawget(L, 6) != LUA_TNUMBER) { /* a key the snapshot doesn't know */
+		lua_settop(L, 2);
+		return next_by_scan(L);
+	}
+	lua_Integer i = lua_tointeger(L, -1) + 1;
+	lua_settop(L, 5);
+	while (lua_rawgeti(L, 5, i++) != LUA_TNIL) {
+		lua_pushvalue(L, -1);
+		if (lua_rawget(L, 1) != LUA_TNIL)
+			return 2;
+		lua_pop(L, 2); /* removed during the walk */
+	}
+	return 1; /* nil: the end */
+}
+
+/* The successor of k by one scan of the table: a walk's first step, or a key no snapshot knows. */
+static int next_by_scan(lua_State *L)
+{
+	if (lua_isnil(L, 2) || key_rank(L, 2) < 3) {
+		lua_pushnil(L); /* 3: the smallest ordered key after k */
+		lua_pushnil(L); /* 4: the scan */
+		while (lua_next(L, 1)) {
+			lua_pop(L, 1);
+			if (key_rank(L, 4) < 3 && (lua_isnil(L, 2) || key_cmp(L, 4, 2) > 0) &&
+			    (lua_isnil(L, 3) || key_cmp(L, 4, 3) < 0)) {
+				lua_pushvalue(L, 4);
+				lua_replace(L, 3);
+			}
+		}
+		if (!lua_isnil(L, 3)) {
+			lua_pushvalue(L, 3);
+			lua_rawget(L, 1);
+			return 2;
+		}
+		/* past the ordered keys: the first of the others */
+		lua_settop(L, 1);
+		lua_pushnil(L);
+	}
+	while (lua_next(L, 1)) {
+		if (key_rank(L, -2) == 3)
+			return 2;
+		lua_pop(L, 1);
+	}
+	lua_pushnil(L);
+	return 1;
+}
+
 /* ---- value <-> Lua ---- */
 
 static void push_value(lua_State *L, const struct value *v)
@@ -690,6 +891,17 @@ static void build_env(lua_State *L, const struct value *props, const struct valu
 		lua_getfield(L, G, *n);
 		lua_setfield(L, env, *n);
 	}
+	lua_pushcfunction(L, sorted_pairs);
+	lua_setfield(L, env, "pairs");
+	lua_pushcfunction(L, sorted_next);
+	lua_setfield(L, env, "next");
+	/* next's snapshots, weak on the table so they go when it does */
+	lua_newtable(L);
+	lua_createtable(L, 0, 1);
+	lua_pushliteral(L, "k");
+	lua_setfield(L, -2, "__mode");
+	lua_setmetatable(L, -2);
+	lua_setfield(L, LUA_REGISTRYINDEX, "gh.next");
 	static const char *const libs[] = { "string", "table", "math", "utf8", NULL };
 	for (const char *const *n = libs; *n; n++) {
 		lua_getfield(L, G, *n);

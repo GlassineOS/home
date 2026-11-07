@@ -335,6 +335,21 @@ static void environment(void)
 	CHECK(strstr(o.text, "binary chunk") != NULL);
 	o = run(W("norender"), NULL, 0, false, false, NULL);
 	CHECK_STR(o.text, "the script must return { render = function(ctx, props) ... end }");
+
+	/*
+	 * pairs and next walk keys in one order, whatever Lua's hash seed (it changes every
+	 * second): false, true, numbers, strings bytewise, then other keys; a key removed
+	 * during a loop is skipped
+	 */
+	o = run(W("order"), NULL, 0, false, false, NULL);
+	const char *all = "false true -2 1.5 3 Bravo alpha charlie delta echo foxtrot golf hotel table";
+	char want[512];
+	snprintf(want, sizeof want, "[{\"t\":\"text\",\"text\":\"%s\"},{\"t\":\"text\",\"text\":\"%s\"},"
+		 "{\"t\":\"text\",\"text\":\"false true -2 1.5 3 Bravo alpha charlie echo foxtrot golf hotel table\"}]",
+		 all, all);
+	CHECK_STR(o.text, want);
+	o = run(W("order"), "{\"case\":\"nextloop\"}", 0, false, false, NULL);
+	CHECK_STR(text_of(&o), "20000");
 }
 
 static void limits(void)
