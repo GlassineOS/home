@@ -5,6 +5,8 @@
 
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static char path[1024];
@@ -113,6 +115,85 @@ int main(void)
 	CHECK(c.read_only);
 	CHECK(!conf_save(path, &c, err, sizeof err));
 	CHECK_STR(read_file(path), "version = 2\nwhatever = true\n");
+	conf_free(&c);
+
+	/* conf_read has no side effects: a broken file stays where it is */
+	write_file("version = 1\nfavourites = \"x\"\n");
+	size_t len;
+	enum conf_state st;
+	char *text = conf_read(path, &len, &st, &c, err, sizeof err);
+	CHECK_INT(st, CONF_BROKEN);
+	CHECK(text && !strcmp(text, "version = 1\nfavourites = \"x\"\n"));
+	CHECK(access(path, F_OK) == 0);
+	free(text);
+	conf_free(&c);
+	write_file("version = 3\n");
+	free(conf_read(path, &len, &st, &c, err, sizeof err));
+	CHECK_INT(st, CONF_NEWER);
+	conf_free(&c);
+	unlink(path);
+	CHECK(conf_read(path, &len, &st, &c, err, sizeof err) == NULL);
+	CHECK_INT(st, CONF_MISSING);
+	write_file("version = 1\nfavourites = [\"a\", \"b\"]\n");
+	text = conf_read(path, &len, &st, &c, err, sizeof err);
+	CHECK_INT(st, CONF_OK);
+	CHECK_INT(c.nfav, 2);
+	free(text);
+
+	/* the format Home writes parses back to the same layout */
+	CHECK_INT(conf_add(&c, "home/app-category", 2, NULL), 0);
+	text = conf_format(&c, &len, err, sizeof err);
+	CHECK(text != NULL);
+	struct home_conf e;
+	CHECK(text && conf_parse(text, len, &e, err, sizeof err));
+	CHECK(conf_favourites_equal(&c, &e));
+	CHECK(conf_widgets_equal(&c, &e));
+	e.w[0].size = 3;
+	CHECK(!conf_widgets_equal(&c, &e));
+	free(e.favourites[1]);
+	e.nfav = 1;
+	CHECK(!conf_favourites_equal(&c, &e));
+	conf_take_favourites(&c, &e);
+	CHECK_INT(c.nfav, 1);
+	CHECK_INT(e.nfav, 0);
+	conf_take_widgets(&c, &e);
+	CHECK_INT(c.w[0].size, 3);
+	CHECK_INT(e.n, 0);
+	conf_free(&e);
+	free(text);
+
+	/* the lock: a second holder waits; conf_save waits for it too */
+	int pfd[2];
+	CHECK(pipe(pfd) == 0);
+	pid_t kid = fork();
+	if (kid == 0) {
+		int fd = conf_lock(path, -1);
+		char ok = fd >= 0 ? 'y' : 'n';
+		if (write(pfd[1], &ok, 1) != 1)
+			_exit(1);
+		usleep(400 * 1000);
+		conf_unlock(fd);
+		_exit(0);
+	}
+	char ok = 0;
+	CHECK(read(pfd[0], &ok, 1) == 1 && ok == 'y');
+	char lockp[1100];
+	snprintf(lockp, sizeof lockp, "%s.lock", path);
+	CHECK(access(lockp, F_OK) == 0);
+	CHECK(conf_lock(path, 50) < 0);
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	CHECK(conf_save(path, &c, err, sizeof err));
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	long waited = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+	CHECK(waited >= 250);
+	waitpid(kid, NULL, 0);
+	int lk = conf_lock(path, 0);
+	CHECK(lk >= 0);
+	conf_unlock(lk);
+	CHECK(access(lockp, F_OK) == 0); /* never removed */
+	close(pfd[0]);
+	close(pfd[1]);
 	conf_free(&c);
 
 	/* duplicate instance ids are refused */
