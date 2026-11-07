@@ -587,6 +587,37 @@ static void stepping(void)
 }
 
 /*
+ * A run keeps the reads it started with: Home rescans its catalog when a widget folder
+ * appears, which frees the manifest the run started from while the run is in flight.
+ * Here the same memory then holds another widget's manifest, with no reads at all.
+ */
+static void reads_outlive_manifest(void)
+{
+	char err[512];
+	struct manifest m;
+	CHECK(manifest_load(W("files"), &m, err, sizeof err));
+	struct value *props = props_effective(&m, NULL);
+	struct run_opts opts = { .now = 1700000000, .home = home };
+	struct run_result r;
+	struct run *run = run_start(&z, W("files"), &m, props, &opts, &r);
+	CHECK(run != NULL && !run_done(run));
+	manifest_free(&m);
+	CHECK(manifest_load(W("hello"), &m, err, sizeof err));
+	CHECK_INT(m.nreads, 0);
+	while (!run_step(run)) {
+		struct pollfd p = { run_fd(run), POLLIN, 0 };
+		poll(&p, 1, run_timeout_ms(run));
+	}
+	CHECK_INT(r.status, RUN_OK);
+	CHECK_STR(r.status == RUN_OK ? r.json.p : r.msg, "[{\"t\":\"text\",\"text\":\"read: hello\"}]");
+	CHECK_INT(r.nfiles, 1);
+	run_free(run);
+	run_result_free(&r);
+	v_free(props);
+	manifest_free(&m);
+}
+
+/*
  * The zygote dies during a run (an OOM kill): the run ends as a crash at once instead
  * of waiting on the zygote's hung-up socket forever, and later runs fail at once.
  */
@@ -647,6 +678,7 @@ int main(void)
 	boundary();
 	outputs();
 	stepping();
+	reads_outlive_manifest();
 	helper_gone();
 	zygote_stop(&z);
 	return t_done("sandbox");

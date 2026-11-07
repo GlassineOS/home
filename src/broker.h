@@ -17,7 +17,12 @@
 #define BROKER_MAX_FILES 64
 
 struct broker {
-	const struct manifest *m;
+	/*
+	 * The manifest's reads, copied: Home's catalog can be rescanned (and the manifest
+	 * freed) while a run is in flight, and the run keeps the reads it started with.
+	 */
+	struct read_entry reads[MAX_READS];
+	size_t nreads;
 	char home[1024];        /* expands "~/" */
 	struct places places;   /* expands "{books}/" */
 	bool force_fallback;    /* tests: use the openat walk instead of openat2 */
@@ -29,7 +34,9 @@ struct broker {
 
 /*
  * home may be NULL: then $HOME is used. The places come from home's places file (or
- * $XDG_CONFIG_HOME's when home is NULL).
+ * $XDG_CONFIG_HOME's when home is NULL). The broker keeps no pointer into m: m may be
+ * freed while the broker is in use. Should copying a read fail (out of memory), that
+ * read and the ones after it are left out: the run then can read less, never more.
  */
 void broker_init(struct broker *b, const struct manifest *m, const char *home);
 void broker_free(struct broker *b);

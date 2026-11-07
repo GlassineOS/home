@@ -536,6 +536,55 @@ static void commands(struct zygote *z)
 	home_free(&h);
 }
 
+/* ---- a run in flight while the layout or the catalog changes ------------------------ */
+
+/* starts card's widget run on the next tick; the run is in flight until Home steps it */
+static bool start_run(struct home *h, int card)
+{
+	h->cards[card].want_run = true;
+	h->cards[card].trig = TRIGGER_APPEAR;
+	home_tick(h);
+	return h->run && h->run_card == card;
+}
+
+static void in_flight(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	/* a user widget root of the test's own, to add a folder to */
+	char users[2048], was[2048];
+	snprintf(was, sizeof was, "%s", getenv("GLASSINE_HOME_USER_WIDGETS"));
+	snprintf(users, sizeof users, "%s/user-widgets", T);
+	sh("rm -rf '%s' && cp -R test/screen/user-widgets '%s'", users, users);
+	setenv("GLASSINE_HOME_USER_WIDGETS", users, 1);
+	struct home h;
+	struct home_io io = { .commit = on_commit };
+	home_init(&h, z, &io);
+	home_resize(&h, 702, 884, 1);
+	home_appear(&h);
+	loop(&h, true, 0, -1, NULL);
+	CHECK_INT(h.cards[C_PHOTO].st.last, RUN_OK);
+
+	/* a widget folder appears while Photo of the day runs: the catalog is rescanned
+	 * (its manifests freed) before the run's file request and image are checked */
+	CHECK(start_run(&h, C_PHOTO));
+	sh("mkdir '%s/arrived'", users);
+	struct pollfd pf = { .fd = h.ino, .events = POLLIN };
+	CHECK(poll(&pf, 1, 2000) == 1);
+	home_ready(&h, h.ino);
+	CHECK(h.run != NULL); /* still in flight */
+	loop(&h, true, 0, -1, NULL);
+	CHECK_INT(h.cards[C_PHOTO].st.last, RUN_OK);
+	CHECK_STR(h.cards[C_PHOTO].fail, "");
+	struct buf j = { 0 };
+	v_to_json(h.cards[C_PHOTO].desc, &j);
+	CHECK(j.p && strstr(j.p, "Pictures/Frame/elbe.png") != NULL);
+	buf_free(&j);
+
+	home_free(&h);
+	setenv("GLASSINE_HOME_USER_WIDGETS", was, 1);
+}
+
 int main(void)
 {
 	setup();
@@ -550,6 +599,7 @@ int main(void)
 		for (int l = 0; l < 2; l++)
 			boards(&z, voices[v], l);
 	commands(&z);
+	in_flight(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");
