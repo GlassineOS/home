@@ -85,6 +85,8 @@ static void setup_home(void)
 	put("data/huge.lua", "local s = \"x\" for i = 1, 30 do s = s .. s end return s\n");
 	put("data/cyclic.lua", "local t = { name = \"c\" } t.self = t return t\n");
 	put("data/syntax.lua", "return {\n");
+	put("data/many.lua", "local t = {} for i = 1, 40000 do t[i] = {} end return t\n");
+	put("data/deep.lua", "local t = {} for i = 1, 100 do t = { t } end return t\n");
 	put_bytecode("data/bytecode.lua", "return { pwned = true }");
 	snprintf(cmd, sizeof cmd,
 		 "cd '%s' && ln -s ../secret.txt data/link && ln -s .. data/linkdir && ln -s sub data/sublink && "
@@ -306,6 +308,16 @@ static void data_files(void)
 	CHECK(strstr(text_of(&o), "data file too large") != NULL);
 	o = run(W("data"), "{\"file\":\"loop.lua\"}", 0, false, false, NULL);
 	CHECK_INT(o.status, RUN_TIME);
+	/*
+	 * fits in its own 4 MB, but the copy doesn't fit in the widget's: over the memory
+	 * limit (the data state used to panic while copying, reported as blocked)
+	 */
+	o = run(W("data"), "{\"file\":\"many.lua\"}", 0, false, false, NULL);
+	CHECK_INT(o.status, RUN_MEMORY);
+	CHECK_STR(o.text, "over the memory limit");
+	/* too deep for the copy: nil and a reason, as for a broken file */
+	o = run(W("data"), "{\"file\":\"deep.lua\"}", 0, false, false, NULL);
+	CHECK_STR(text_of(&o), "error: ~/data/deep.lua: data nested too deep");
 	/* a data file is a file like any other: unlisted is refused */
 	o = run(W("data"), "{\"file\":\"../secret.txt\"}", 0, false, false, NULL);
 	CHECK_INT(o.status, RUN_ERROR);

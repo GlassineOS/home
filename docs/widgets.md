@@ -97,7 +97,7 @@ give the same output), `utf8`, `ipairs`, `pairs`, `next`, `type`, `tostring`, `t
 | | |
 |---|---|
 | `ctx.read(path)` | The file's contents as a string; `nil, reason` if it doesn't exist or can't be read. Raises an error for a path outside `reads`. At most 2 MB. |
-| `ctx.load_lua(path)` | Evaluates a Lua data file (like KOReader's `history.lua`) in an empty environment and returns its value: tables, strings, numbers, booleans. Functions are dropped. A data file can't reach anything: it has no globals except `inf` and `nan` (KOReader writes those as bare words), no libraries, no string methods. `nil, reason` on a missing or broken file. |
+| `ctx.load_lua(path)` | Evaluates a Lua data file (like KOReader's `history.lua`) in an empty environment and returns its value: tables, strings, numbers, booleans. Functions are dropped. A data file can't reach anything: it has no globals except `inf` and `nan` (KOReader writes those as bare words), no libraries, no string methods. `nil, reason` on a missing or broken file, or one that is too large (over its own 4 MB, or more than 200 000 values) or nested more than 64 deep. The value it returns counts against the widget's own memory. |
 | `ctx.sidecar(book)` | The path of a KOReader book's metadata: `/x/Book.epub` → `/x/Book.sdr/metadata.epub.lua`. Reading it needs the book's directory in `reads`, usually through `{books}/`. |
 | `ctx.now` | The time of the run, in seconds since 1970. |
 | `ctx.apps` | App data for Home's own app widgets' settings (for example `categories = { {name=, count=} }`); absent for other widgets. |

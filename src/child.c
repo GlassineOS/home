@@ -256,11 +256,16 @@ static int l_read(lua_State *L)
 	return 1;
 }
 
+/*
+ * Copying a data file's value from its state into the widget's. The data state never
+ * allocates here: it has no protected call left to catch a failure, and an unprotected
+ * one panics. The map of tables already copied lives in the widget's state, keyed by
+ * the source table's address, and the copy runs under a protected call there.
+ */
 struct copy {
 	lua_State *src, *dst;
-	int seen_src, seen_dst; /* absolute indices of the table maps */
+	int seen; /* index in dst of the map: source table (light userdata) -> its copy */
 	long nodes;
-	int next_id;
 	const char *err;
 };
 
@@ -312,22 +317,16 @@ static bool copy_value(struct copy *c, int si, int depth)
 	}
 	si = lua_absindex(s, si);
 	/* a table seen before (shared or cyclic) maps to the same copy */
-	lua_pushvalue(s, si);
-	if (lua_rawget(s, c->seen_src) == LUA_TNUMBER) {
-		lua_Integer id = lua_tointeger(s, -1);
-		lua_pop(s, 1);
-		lua_rawgeti(d, c->seen_dst, id);
+	void *key = (void *)lua_topointer(s, si);
+	lua_pushlightuserdata(d, key);
+	if (lua_rawget(d, c->seen) == LUA_TTABLE)
 		return true;
-	}
-	lua_pop(s, 1);
-	int id = ++c->next_id;
-	lua_pushvalue(s, si);
-	lua_pushinteger(s, id);
-	lua_rawset(s, c->seen_src);
+	lua_pop(d, 1);
 	lua_newtable(d);
 	int di = lua_gettop(d);
+	lua_pushlightuserdata(d, key);
 	lua_pushvalue(d, di);
-	lua_rawseti(d, c->seen_dst, id);
+	lua_rawset(d, c->seen);
 	lua_pushnil(s);
 	while (lua_next(s, si)) { /* raw traversal: no metatables exist in the data state */
 		if (copy_key_ok(s, -2)) {
@@ -343,6 +342,15 @@ static bool copy_value(struct copy *c, int si, int depth)
 	return true;
 }
 
+/* Runs in the widget's state: arg 1 is the struct copy; returns the copy, or nothing with c->err set. */
+static int copy_protected(lua_State *L)
+{
+	struct copy *c = lua_touserdata(L, 1);
+	lua_newtable(L);
+	c->seen = lua_gettop(L);
+	return copy_value(c, -1, 0) ? 1 : 0;
+}
+
 static struct cap dcap;
 
 static void data_hook(lua_State *L, lua_Debug *ar)
@@ -351,6 +359,13 @@ static void data_hook(lua_State *L, lua_Debug *ar)
 	(void)ar;
 	if (past_deadline())
 		die(ERR_TIME, "over the time limit (reading a data file)");
+}
+
+/* The data state's unprotected steps are a few small allocations before its chunk runs. */
+static int data_panic(lua_State *L)
+{
+	(void)L;
+	die(ERR_MEMORY, "over the memory limit (reading a data file)");
 }
 
 static int l_load_lua(lua_State *L)
@@ -371,6 +386,7 @@ static int l_load_lua(lua_State *L)
 		free(b);
 		return luaL_error(L, "not enough memory");
 	}
+	lua_atpanic(D, data_panic);
 	lua_sethook(D, data_hook, LUA_MASKCOUNT, 1000);
 	/* KOReader writes infinities and NaN with tostring(): inf, -inf, nan, -nan */
 	lua_newtable(D);
@@ -387,24 +403,29 @@ static int l_load_lua(lua_State *L)
 		st = lua_pcall(D, 0, 1, 0);
 	}
 	if (st != LUA_OK) {
-		const char *e = dcap.hit ? "data file too large" : lua_tostring(D, -1);
+		/* not lua_tostring on a non-string: converting it would allocate in D */
+		const char *e = dcap.hit ? "data file too large" : lua_type(D, -1) == LUA_TSTRING ? lua_tostring(D, -1) : "error";
 		lua_pushnil(L);
-		lua_pushfstring(L, "%s: %s", path, e ? e : "error");
+		lua_pushfstring(L, "%s: %s", path, e);
 		lua_close(D);
 		return 2;
 	}
-	lua_newtable(D);
-	int seen_src = lua_gettop(D);
-	lua_newtable(L);
-	int seen_dst = lua_gettop(L);
-	struct copy c = { D, L, seen_src, seen_dst, 0, 0, NULL };
-	if (!copy_value(&c, -2, 0)) {
-		const char *e = c.err;
-		lua_close(D);
-		return luaL_error(L, "%s: %s", path, e);
-	}
+	struct copy c = { D, L, 0, 0, NULL };
+	lua_pushcfunction(L, copy_protected);
+	lua_pushlightuserdata(L, &c);
+	st = lua_pcall(L, 1, 1, 0);
 	lua_close(D);
-	lua_remove(L, seen_dst);
+	if (st != LUA_OK) {
+		/* the copy didn't fit in the widget's own memory */
+		if (wcap.hit)
+			die(ERR_MEMORY, "over the memory limit");
+		return lua_error(L);
+	}
+	if (c.err) {
+		lua_pushnil(L);
+		lua_pushfstring(L, "%s: %s", path, c.err);
+		return 2;
+	}
 	return 1;
 }
 
