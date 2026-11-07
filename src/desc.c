@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "desc.h"
+#include "manifest.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -100,6 +101,21 @@ static bool app_id_valid(const char *s, size_t n)
 static bool abs_path_valid(const char *s, size_t n)
 {
 	return n >= 2 && n <= 4096 && s[0] == '/' && strlen(s) == n && utf8_valid(s, n);
+}
+
+/* An absolute path without empty, "." or ".." parts, outside /proc, /sys, /dev and /run. */
+static bool clean_path(const char *s, size_t n)
+{
+	if (!abs_path_valid(s, n) || path_forbidden_root(s))
+		return false;
+	for (const char *c = s + 1, *end = s + n; c <= end;) {
+		const char *e = memchr(c, '/', (size_t)(end - c));
+		size_t len = e ? (size_t)(e - c) : (size_t)(end - c);
+		if (len == 0 || (len == 1 && c[0] == '.') || (len == 2 && c[0] == '.' && c[1] == '.'))
+			return false;
+		c += len + 1;
+	}
+	return true;
 }
 
 static bool page_valid(const char *s, size_t n)
@@ -236,8 +252,13 @@ static struct value *image(struct nctx *c, const struct value *in)
 			goto bad;
 		}
 	} else if (!strncmp(s, "cover:", 6)) {
-		if (!abs_path_valid(s + 6, n - 6)) {
-			nfail(c, "%s", "ui.image: cover: needs an absolute path");
+		/*
+		 * Home reads the book to find its cover, so the widget picks a file Home reads; the
+		 * image worker must open it like broker_open does (no links, regular files only)
+		 */
+		if (!clean_path(s + 6, n - 6)) {
+			nfail(c, "%s", "ui.image: cover: needs an absolute path without '.' or '..' parts, "
+				       "outside /proc, /sys, /dev and /run");
 			goto bad;
 		}
 	} else if (!strncmp(s, "icon:", 5)) {

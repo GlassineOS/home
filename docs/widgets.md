@@ -131,7 +131,8 @@ boundary.
 Actions: `ui.open(app, file)` (an app id, an optional absolute file path) and `ui.settings(page)`.
 Nothing else can run.
 
-Image slots: `src` is `file:PATH` (inside `reads`), `cover:PATH` (an ebook's cover) or `icon:APP`;
+Image slots: `src` is `file:PATH` (inside `reads`), `cover:PATH` (an ebook's cover: an absolute
+path without `.` or `..` parts, outside `/proc`, `/sys`, `/dev` and `/run`) or `icon:APP`;
 no network sources. `h` (and `w` when `side` is set) are whole pixels from 1 to 2000; Home clamps
 them to the card. `side` is `"left"`, `"right"` or absent/`"none"` (full width); `fit` is `"cover"`
 (default) or `"contain"`; `alt` is required (shown in the dashed frame until the image is ready).

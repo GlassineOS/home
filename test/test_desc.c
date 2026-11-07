@@ -82,6 +82,18 @@ int main(void)
 	snprintf(three, sizeof three, "[%s,%s,%s]", img, img, img);
 	CHECK_STR(norm(three, false), "ERR: at most two ui.image");
 
+	/* cover: a clean absolute path, nothing in a system area */
+	static const char *const bad_covers[] = { "/proc/self/environ", "/dev/zero", "/sys/x", "/run/x",
+		"/b/../etc/passwd", "/b/./c.epub", "/b//c.epub", "/b/c.epub/", "/proc" };
+	for (size_t i = 0; i < sizeof bad_covers / sizeof *bad_covers; i++) {
+		char j[256];
+		snprintf(j, sizeof j, "[{\"t\":\"image\",\"src\":\"cover:%s\",\"h\":10,\"alt\":\"x\"}]", bad_covers[i]);
+		CHECK_STR(norm(j, false), "ERR: ui.image: cover: needs an absolute path without '.' or '..' parts, "
+					  "outside /proc, /sys, /dev and /run");
+	}
+	CHECK_STR(norm("[{\"t\":\"image\",\"src\":\"cover:/procedures/a b.epub\",\"h\":10,\"alt\":\"x\"}]", false),
+		  "[{\"alt\":\"x\",\"fit\":\"cover\",\"h\":10,\"src\":\"cover:/procedures/a b.epub\",\"t\":\"image\"}]");
+
 	/* file: sources must be in the reads */
 	const char *fj = "[{\"t\":\"image\",\"src\":\"file:/etc/x.png\",\"h\":10,\"alt\":\"x\"}]";
 	struct value *in = v_from_json(fj, strlen(fj), 8, err, sizeof err);
