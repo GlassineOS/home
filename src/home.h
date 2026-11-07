@@ -252,7 +252,13 @@ bool img_cover_path(const char *book, char *out, size_t len);
  * False for a source over max_px pixels (IMAGE_MAX_SOURCE_PX; tests pass less).
  */
 bool img_decode_size(int sw, int sh, int w, int h, bool contain, long long max_px, int *tw, int *th);
-/* The worker's job for one slot: w x h greys (0 = black), or NULL (broken, too large). */
+/*
+ * A source's format (a MIME type) and size, from its header alone: PNG, JPEG, WebP or GIF.
+ * NULL for any other format, for an animation (APNG, an animated WebP, a GIF of more than
+ * one image) and for a header that doesn't give the size.
+ */
+const char *img_measure(const unsigned char *d, size_t n, int *w, int *h);
+/* The worker's job for one slot: w x h greys (0 = black), or NULL (not measured, broken, too large). */
 unsigned char *img_prepare(int fd, int w, int h, bool contain, int dmode, long long max_px);
 
 #endif

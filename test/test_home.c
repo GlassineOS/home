@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib.h>
 
 #include "../src/home.h"
@@ -812,6 +813,215 @@ static unsigned char *prepare_file(const char *path, int w, int h, bool contain,
 	return g;
 }
 
+/* ---- pictures by the byte: headers to measure, and a large PNG without a compressor ---- */
+
+static uint32_t crc32_of(uint32_t c, const unsigned char *p, size_t n)
+{
+	c = ~c;
+	while (n--) {
+		c ^= *p++;
+		for (int k = 0; k < 8; k++)
+			c = c >> 1 ^ (0xedb88320u & -(c & 1));
+	}
+	return ~c;
+}
+
+static void be32_put(unsigned char *p, uint32_t v)
+{
+	p[0] = (unsigned char)(v >> 24);
+	p[1] = (unsigned char)(v >> 16);
+	p[2] = (unsigned char)(v >> 8);
+	p[3] = (unsigned char)v;
+}
+
+static void le32_put(unsigned char *p, uint32_t v)
+{
+	p[0] = (unsigned char)v;
+	p[1] = (unsigned char)(v >> 8);
+	p[2] = (unsigned char)(v >> 16);
+	p[3] = (unsigned char)(v >> 24);
+}
+
+/* a PNG chunk at p: its length, type, data and CRC; returns its size */
+static size_t png_chunk(unsigned char *p, const char *type, const void *d, uint32_t n)
+{
+	be32_put(p, n);
+	memcpy(p + 4, type, 4);
+	if (n)
+		memcpy(p + 8, d, n);
+	be32_put(p + 8 + n, crc32_of(0, p + 4, (size_t)n + 4));
+	return (size_t)n + 12;
+}
+
+/* the signature and IHDR of a w x h 8-bit grey PNG */
+static size_t png_start(unsigned char *p, uint32_t w, uint32_t h)
+{
+	unsigned char ih[13] = { 0 };
+	be32_put(ih, w);
+	be32_put(ih + 4, h);
+	ih[8] = 8;
+	memcpy(p, "\x89PNG\r\n\x1a\n", 8);
+	return 8 + png_chunk(p + 8, "IHDR", ih, 13);
+}
+
+/* deflate's bits, the lowest first; a Huffman code goes in from its highest bit */
+struct bits { unsigned char *p; size_t n; unsigned acc, nb; };
+
+static void bits_put(struct bits *b, uint32_t v, int n)
+{
+	for (int i = 0; i < n; i++) {
+		b->acc |= (v >> i & 1) << b->nb;
+		if (++b->nb == 8) {
+			b->p[b->n++] = (unsigned char)b->acc;
+			b->acc = b->nb = 0;
+		}
+	}
+}
+
+static void bits_code(struct bits *b, uint32_t code, int n)
+{
+	for (int i = n - 1; i >= 0; i--)
+		bits_put(b, code >> i & 1, 1);
+}
+
+/*
+ * A valid w x h 8-bit grey PNG, all black, without a compressor: every byte of the image
+ * data is 0 (each row's filter, then its pixels), so it is one fixed-Huffman deflate block
+ * of a literal 0 and copies of 258 bytes at distance 1. 16000 x 16000 is 1.6 MB.
+ */
+static void grey_png(const char *path, uint32_t w, uint32_t h)
+{
+	unsigned long long total = ((unsigned long long)w + 1) * h, left = total - 1;
+	size_t cap = (size_t)(total / 258 * 13 / 8) + 512;
+	unsigned char *z = malloc(cap), *png = malloc(cap + 128);
+	CHECK(z && png);
+	if (!z || !png)
+		exit(1);
+	struct bits b = { z, 0, 0, 0 };
+	z[b.n++] = 0x78; /* zlib: deflate, 32K window */
+	z[b.n++] = 0x01;
+	bits_put(&b, 1, 1);     /* the last block */
+	bits_put(&b, 1, 2);     /* fixed Huffman codes */
+	bits_code(&b, 0x30, 8); /* literal 0 */
+	for (; left >= 258; left -= 258) {
+		bits_code(&b, 0xc5, 8); /* length 258 (code 285) */
+		bits_code(&b, 0, 5);    /* distance 1 */
+	}
+	for (; left; left--)
+		bits_code(&b, 0x30, 8);
+	bits_code(&b, 0, 7); /* end of block */
+	if (b.nb)
+		bits_put(&b, 0, 8 - (int)b.nb);
+	be32_put(z + b.n, (uint32_t)(total % 65521) << 16 | 1); /* Adler-32 of zeros */
+	b.n += 4;
+	size_t n = png_start(png, w, h);
+	n += png_chunk(png + n, "IDAT", z, (uint32_t)b.n);
+	n += png_chunk(png + n, "IEND", NULL, 0);
+	FILE *f = fopen(path, "wb");
+	CHECK(f && fwrite(png, 1, n, f) == n && fclose(f) == 0);
+	free(z);
+	free(png);
+}
+
+static bool measures(const void *d, size_t n, const char *type, int w, int h)
+{
+	int mw = -1, mh = -1;
+	const char *t = img_measure(d, n, &mw, &mh);
+	if (!type)
+		return t == NULL;
+	if (!t || strcmp(t, type) || mw != w || mh != h) {
+		fprintf(stderr, "test_home: measured %s %d x %d, want %s %d x %d\n", t ? t : "(none)", mw, mh, type, w, h);
+		return false;
+	}
+	return true;
+}
+
+/* the header parsers on crafted bytes: what each format's header says, and what's refused */
+static void headers(void)
+{
+	unsigned char b[512];
+	size_t n;
+	/* PNG: IHDR's size; the chunks up to the first IDAT are walked, and an acTL there is APNG */
+	n = png_start(b, 640, 480);
+	n += png_chunk(b + n, "tEXt", "k\0v", 3);
+	n += png_chunk(b + n, "IDAT", NULL, 0);
+	CHECK(measures(b, n, "image/png", 640, 480));
+	n = png_start(b, 640, 480);
+	n += png_chunk(b + n, "acTL", "\0\0\0\2\0\0\0\0", 8);
+	n += png_chunk(b + n, "IDAT", NULL, 0);
+	CHECK(measures(b, n, NULL, 0, 0));
+	n = png_start(b, 640, 480); /* no IDAT */
+	CHECK(measures(b, n, NULL, 0, 0));
+	n = png_start(b, 640, 480);
+	n += png_chunk(b + n, "tEXt", "k\0v", 3);
+	CHECK(measures(b, n - 1, NULL, 0, 0)); /* a chunk past the end */
+	n = png_start(b, 0, 480);
+	n += png_chunk(b + n, "IDAT", NULL, 0);
+	CHECK(measures(b, n, NULL, 0, 0));
+
+	/* JPEG: segments by their length, so a frame inside an Exif thumbnail isn't the one;
+	 * fill bytes before a marker; a progressive frame (SOF2) */
+	static const unsigned char jpg[] = "\xff\xd8"
+		"\xff\xe1\x00\x0e" "Exif\0\0" "\xff\xc0\x00\x11\x08\x00"
+		"\xff\xff\xc2\x00\x11\x08\x00\x30\x00\x40\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01";
+	CHECK(measures(jpg, sizeof jpg - 1, "image/jpeg", 64, 48));
+	unsigned char j[64];
+	memcpy(j, jpg, sizeof jpg - 1);
+	j[24] = j[25] = 0; /* height from a DNL marker */
+	CHECK(measures(j, sizeof jpg - 1, NULL, 0, 0));
+	memcpy(j, jpg, sizeof jpg - 1);
+	j[20] = 0xc5; /* differential (hierarchical) */
+	CHECK(measures(j, sizeof jpg - 1, NULL, 0, 0));
+	CHECK(measures("\xff\xd8\xff\xda\x00\x02", 6, NULL, 0, 0)); /* scan data before a frame */
+	CHECK(measures("\xff\xd8\xff\xe1\x00\x40" "Exif", 10, NULL, 0, 0)); /* past the end */
+	CHECK(measures(jpg, 20, NULL, 0, 0));
+
+	/* WebP: lossy (14 bits, the scale bits left out), lossless, extended with its canvas */
+	unsigned char w[64];
+	memcpy(w, "RIFF\0\0\0\0WEBPVP8 \x0a\0\0\0\0\0\0\x9d\x01\x2a", 26);
+	w[26] = 320 & 255;
+	w[27] = 320 >> 8 | 0x40;
+	w[28] = 240;
+	w[29] = 0;
+	CHECK(measures(w, 30, "image/webp", 320, 240));
+	w[24] = 0x2b; /* not a key frame's start code */
+	CHECK(measures(w, 30, NULL, 0, 0));
+	memcpy(w + 12, "VP8L\x05\0\0\0\x2f", 9);
+	le32_put(w + 21, 399 | 299u << 14);
+	CHECK(measures(w, 25, "image/webp", 400, 300));
+	memcpy(w + 12, "VP8X\x0a\0\0\0\x10\0\0\0", 12);
+	w[24] = 999 & 255, w[25] = 999 >> 8, w[26] = 0;
+	w[27] = 749 & 255, w[28] = 749 >> 8, w[29] = 0;
+	memcpy(w + 30, "VP8L\x05\0\0\0\x2f", 9);
+	le32_put(w + 39, 999 | 749u << 14);
+	CHECK(measures(w, 43, "image/webp", 1000, 750));
+	w[20] |= 0x02; /* the animation flag */
+	CHECK(measures(w, 43, NULL, 0, 0));
+	w[20] &= ~0x02;
+	memcpy(w + 30, "ANIM", 4); /* an animation's chunk without the flag */
+	CHECK(measures(w, 43, NULL, 0, 0));
+	CHECK(measures("RIFF\0\0\0\0WAVEfmt \x10\0\0\0", 20, NULL, 0, 0));
+
+	/* GIF: one image; its extent past the logical screen counts; a second image is animation */
+	static const unsigned char gif[] = "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff"
+		"\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+	CHECK(measures(gif, sizeof gif - 1, "image/gif", 1, 1));
+	unsigned char g[128];
+	memcpy(g, gif, sizeof gif - 1);
+	g[32] = 10;
+	g[34] = 5;
+	CHECK(measures(g, sizeof gif - 1, "image/gif", 10, 5));
+	memcpy(g, gif, sizeof gif - 1);
+	memcpy(g + 42, gif + 19, sizeof gif - 1 - 19); /* the frame again, then the trailer */
+	CHECK(measures(g, 42 + sizeof gif - 1 - 19, NULL, 0, 0));
+
+	/* other formats, and nothing */
+	CHECK(measures("BM\x36\0\0\0\0\0\0\0\x36\0\0\0", 14, NULL, 0, 0));
+	static const char svg[] = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+	CHECK(measures(svg, sizeof svg - 1, NULL, 0, 0));
+	CHECK(measures("", 0, NULL, 0, 0));
+}
+
 static void image_limits(void)
 {
 	int tw = 0, th = 0;
@@ -859,6 +1069,51 @@ static void image_limits(void)
 	CHECK(lightest < 8);
 	free(g);
 
+	/* a 16000 x 16000 8-bit grey PNG is refused before decoding: told to stop, glycin
+	 * decoded it all the same (about 1 GB). Its 3000 x 3000 twin decodes, all black, so the
+	 * file is one the decoder reads. */
+	snprintf(p, sizeof p, "%s/grey.png", T);
+	grey_png(p, 3000, 3000);
+	g = prepare_file(p, 300, 300, false, IMAGE_MAX_SOURCE_PX);
+	CHECK(g != NULL);
+	darkest = 0;
+	for (int i = 0; g && i < 300 * 300; i++)
+		darkest += g[i] == 0;
+	CHECK_INT(darkest, 300 * 300);
+	free(g);
+	grey_png(p, 16000, 16000);
+	before = peak_rss_kb();
+	CHECK(prepare_file(p, 300, 300, false, IMAGE_MAX_SOURCE_PX) == NULL);
+	CHECK(peak_rss_kb() - before < 100 * 1024);
+
+	/* the loader is the one for the measured type: a JPEG and a GIF decode */
+	GdkPixbuf *pb = gdk_pixbuf_new(GDK_COLORSPACE_RGB, false, 8, 64, 48);
+	gdk_pixbuf_fill(pb, 0xffffffff);
+	GdkPixbuf *half = gdk_pixbuf_new_subpixbuf(pb, 0, 0, 32, 48);
+	gdk_pixbuf_fill(half, 0x000000ff);
+	g_object_unref(half);
+	gchar *jbuf = NULL;
+	gsize jlen = 0;
+	CHECK(gdk_pixbuf_save_to_buffer(pb, &jbuf, &jlen, "jpeg", NULL, "quality", "95", NULL));
+	g_object_unref(pb);
+	CHECK(measures(jbuf, jlen, "image/jpeg", 64, 48));
+	snprintf(p, sizeof p, "%s/half.jpg", T);
+	FILE *f = fopen(p, "wb");
+	CHECK(f && fwrite(jbuf, 1, jlen, f) == jlen && fclose(f) == 0);
+	g_free(jbuf);
+	g = prepare_file(p, 32, 24, true, IMAGE_MAX_SOURCE_PX);
+	CHECK(g != NULL);
+	CHECK(g && g[12 * 32 + 4] < 32 && g[12 * 32 + 27] > 224);
+	free(g);
+	static const unsigned char gif[] = "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff"
+		"\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+	snprintf(p, sizeof p, "%s/dot.gif", T);
+	f = fopen(p, "wb");
+	CHECK(f && fwrite(gif, 1, sizeof gif - 1, f) == sizeof gif - 1 && fclose(f) == 0);
+	g = prepare_file(p, 4, 4, false, IMAGE_MAX_SOURCE_PX);
+	CHECK(g != NULL);
+	free(g);
+
 	/* over the limit, a well-formed image is refused by the loader in use (the limit is
 	 * passed small here); under it, the same file decodes */
 	snprintf(p, sizeof p, "%s/meadow.png", T);
@@ -884,6 +1139,7 @@ int main(void)
 			boards(&z, voices[v], l);
 	commands(&z);
 	in_flight(&z);
+	headers();
 	image_limits();
 	frames_busy();
 	touch_targets(&z);

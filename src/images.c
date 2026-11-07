@@ -8,11 +8,13 @@
  *
  * Sources: file:PATH (a file the widget's reads cover; the description check made
  * sure), cover:BOOK (the book's freedesktop thumbnail), icon:APP (the app's icon,
- * drawn on the main thread: the icon index belongs to it). Over 20 MB, over 40 million
- * pixels or broken: the slot keeps its dashed frame and alt text.
+ * drawn on the main thread: the icon index belongs to it). A source is a still PNG, JPEG,
+ * WebP or GIF, measured from its header before it is decoded; over 20 MB, over 40 million
+ * pixels, another format, an animation or broken: the slot keeps its dashed frame and alt text.
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -101,6 +103,167 @@ static void dither(unsigned char *g, int w, int h, int mode)
 		}
 }
 
+/* ---- a picture's size from its header, before any decoder sees it ------------------- */
+
+static uint32_t be16(const unsigned char *p) { return (uint32_t)p[0] << 8 | p[1]; }
+static uint32_t be32(const unsigned char *p) { return be16(p) << 16 | be16(p + 2); }
+static uint32_t le16(const unsigned char *p) { return p[0] | (uint32_t)p[1] << 8; }
+static uint32_t le24(const unsigned char *p) { return le16(p) | (uint32_t)p[2] << 16; }
+static uint32_t le32(const unsigned char *p) { return le24(p) | (uint32_t)p[3] << 24; }
+
+static bool sized(uint32_t sw, uint32_t sh, int *w, int *h)
+{
+	if (!sw || !sh || sw > INT_MAX || sh > INT_MAX)
+		return false;
+	*w = (int)sw;
+	*h = (int)sh;
+	return true;
+}
+
+/* PNG: IHDR comes first; an acTL before the first IDAT makes it an animation (APNG) */
+static bool png_size(const unsigned char *d, size_t n, int *w, int *h)
+{
+	if (n < 33 || memcmp(d, "\x89PNG\r\n\x1a\n", 8) || be32(d + 8) != 13 || memcmp(d + 12, "IHDR", 4))
+		return false;
+	for (size_t at = 33;;) {
+		if (n - at < 8 || !memcmp(d + at + 4, "acTL", 4))
+			return false;
+		if (!memcmp(d + at + 4, "IDAT", 4))
+			return sized(be32(d + 16), be32(d + 20), w, h);
+		unsigned long long len = be32(d + at);
+		if (len + 12 > n - at)
+			return false;
+		at += (size_t)len + 12;
+	}
+}
+
+/*
+ * JPEG: the frame header (SOFn), segment by segment from the start. A height left to a
+ * later DNL marker and the hierarchical processes (DHP, the differential SOFs), whose
+ * first frame isn't the picture's size, aren't measured.
+ */
+static bool jpeg_size(const unsigned char *d, size_t n, int *w, int *h)
+{
+	if (n < 4 || d[0] != 0xff || d[1] != 0xd8)
+		return false;
+	for (size_t at = 2;;) {
+		if (at >= n || d[at] != 0xff)
+			return false;
+		while (at < n && d[at] == 0xff) /* fill bytes */
+			at++;
+		if (at >= n)
+			return false;
+		unsigned m = d[at++];
+		if (m == 0x01 || (m >= 0xd0 && m <= 0xd7)) /* no length */
+			continue;
+		if (m == 0xd8 || m == 0xd9 || m == 0xda || m == 0xde || m == 0x00)
+			return false; /* SOI, EOI, SOS (data) or DHP before a frame */
+		if (n - at < 2)
+			return false;
+		size_t len = be16(d + at);
+		if (len < 2 || len > n - at)
+			return false;
+		bool sof = m >= 0xc0 && m <= 0xcf && m != 0xc4 && m != 0xc8 && m != 0xcc;
+		if (sof) {
+			if ((m & 0x07) >= 5 || len < 8) /* C5-C7, CD-CF: differential */
+				return false;
+			return sized(be16(d + at + 5), be16(d + at + 3), w, h);
+		}
+		at += len;
+	}
+}
+
+static bool webp_frame(const unsigned char *four, const unsigned char *c, uint32_t len, uint32_t *fw, uint32_t *fh)
+{
+	if (!memcmp(four, "VP8 ", 4)) { /* lossy: the key frame's start code, then 14-bit sizes */
+		if (len < 10 || c[3] != 0x9d || c[4] != 0x01 || c[5] != 0x2a)
+			return false;
+		*fw = le16(c + 6) & 0x3fff;
+		*fh = le16(c + 8) & 0x3fff;
+		return true;
+	}
+	if (!memcmp(four, "VP8L", 4)) { /* lossless: a signature, then 14-bit sizes less one */
+		if (len < 5 || c[0] != 0x2f)
+			return false;
+		uint32_t b = le32(c + 1);
+		*fw = (b & 0x3fff) + 1;
+		*fh = (b >> 14 & 0x3fff) + 1;
+		return true;
+	}
+	return false;
+}
+
+/* WebP: one VP8 or VP8L chunk, or VP8X (the canvas) before one; ANIM or ANMF is an animation */
+static bool webp_size(const unsigned char *d, size_t n, int *w, int *h)
+{
+	if (n < 20 || memcmp(d, "RIFF", 4) || memcmp(d + 8, "WEBP", 4))
+		return false;
+	uint32_t cw = 0, ch = 0;
+	for (size_t at = 12; n - at >= 8;) {
+		const unsigned char *four = d + at, *c = d + at + 8;
+		uint32_t len = le32(d + at + 4), fw, fh;
+		if (len > n - at - 8 || !memcmp(four, "ANIM", 4) || !memcmp(four, "ANMF", 4))
+			return false;
+		if (at == 12 && !memcmp(four, "VP8X", 4)) {
+			if (len < 10 || c[0] & 0x02) /* the animation flag */
+				return false;
+			cw = le24(c + 4) + 1;
+			ch = le24(c + 7) + 1;
+		} else if (webp_frame(four, c, len, &fw, &fh)) {
+			return sized(fw > cw ? fw : cw, fh > ch ? fh : ch, w, h);
+		} else if (!cw) {
+			return false; /* a simple file is its VP8 or VP8L chunk */
+		}
+		size_t next = (size_t)len + (len & 1) + 8;
+		if (next > n - at)
+			return false;
+		at += next;
+	}
+	return false;
+}
+
+/* GIF: the logical screen and the image's own extent; a second image is an animation */
+static bool gif_size(const unsigned char *d, size_t n, int *w, int *h)
+{
+	if (n < 13 || (memcmp(d, "GIF87a", 6) && memcmp(d, "GIF89a", 6)))
+		return false;
+	uint32_t sw = le16(d + 6), sh = le16(d + 8);
+	size_t at = 13 + (d[10] & 0x80 ? 3u << ((d[10] & 7) + 1) : 0);
+	int images = 0;
+	while (at < n && d[at] != 0x3b) {
+		if (d[at] == 0x21) { /* an extension: its label, then sub-blocks */
+			at += 2;
+		} else if (d[at] == 0x2c) { /* an image: its descriptor, colour table, code size, sub-blocks */
+			if (++images > 1 || n - at < 11)
+				return false;
+			uint32_t r = le16(d + at + 1) + le16(d + at + 5), b = le16(d + at + 3) + le16(d + at + 7);
+			sw = r > sw ? r : sw;
+			sh = b > sh ? b : sh;
+			unsigned fl = d[at + 9];
+			at += 11 + (fl & 0x80 ? 3u << ((fl & 7) + 1) : 0);
+		} else {
+			return false;
+		}
+		while (at < n && d[at])
+			at += 1 + (size_t)d[at];
+		at++;
+	}
+	return images == 1 && sized(sw, sh, w, h);
+}
+
+const char *img_measure(const unsigned char *d, size_t n, int *w, int *h)
+{
+	if (png_size(d, n, w, h))
+		return "image/png";
+	if (jpeg_size(d, n, w, h))
+		return "image/jpeg";
+	if (webp_size(d, n, w, h))
+		return "image/webp";
+	if (gif_size(d, n, w, h))
+		return "image/gif";
+	return NULL;
+}
+
 bool img_decode_size(int sw, int sh, int w, int h, bool contain, long long max_px, int *tw, int *th)
 {
 	if (sw <= 0 || sh <= 0 || w <= 0 || h <= 0 || (long long)sw * sh > max_px)
@@ -148,10 +311,26 @@ unsigned char *img_prepare(int fd, int w, int h, bool contain, int dmode, long l
 		free(data);
 		return NULL;
 	}
-	struct fit f = { w, h, contain, max_px, false };
-	GdkPixbufLoader *l = gdk_pixbuf_loader_new();
-	g_signal_connect(l, "size-prepared", G_CALLBACK(size_prepared), &f);
+	/*
+	 * The size from the header first: a decoder may decode a whole picture it is told to
+	 * refuse (glycin does, for an 8-bit grey PNG). Then the loader for that format only,
+	 * so the decoder is the one the header was read for.
+	 */
+	int sw, sh, tw, th;
+	const char *type = img_measure(data, got, &sw, &sh);
 	GError *err = NULL;
+	GdkPixbufLoader *l = type && img_decode_size(sw, sh, w, h, contain, max_px, &tw, &th)
+		? gdk_pixbuf_loader_new_with_mime_type(type, &err) : NULL;
+	if (!l) {
+		if (err) {
+			fprintf(stderr, "glassine-home: an image: %s\n", err->message);
+			g_error_free(err);
+		}
+		free(data);
+		return NULL;
+	}
+	struct fit f = { w, h, contain, max_px, false };
+	g_signal_connect(l, "size-prepared", G_CALLBACK(size_prepared), &f);
 	bool ok = gdk_pixbuf_loader_write(l, data, got, &err);
 	ok = gdk_pixbuf_loader_close(l, ok ? &err : NULL) && ok;
 	if (err) {

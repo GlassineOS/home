@@ -53,7 +53,9 @@ voices, portrait and landscape, drawn offscreen from the fixtures in `test/scree
 - Image slots are loaded, scaled and greyed on a worker thread (gdk-pixbuf), dithered only when the
   panel's dithering is on (`/etc/glassine/eink.conf`), and cached by source, its date and size, the
   slot size and the dithering, in memory and in `~/.cache/glassine-home/images`. Until then the
-  slot is a dashed frame with its alt text; a source over 20 MB or 40 million pixels keeps it.
+  slot is a dashed frame with its alt text. Sources are still PNG, JPEG, WebP or GIF, measured from
+  their header before decoding; another format, an animation, or over 20 MB or 40 million pixels
+  keeps the frame.
 - Built-in widgets are installed in `/usr/share/glassine-home/widgets`; App category's settings
   script in `/usr/share/glassine-home/native`. Favourites live in the layout file; the shell's old
   `~/.config/glassine-shell/favourites` is imported once, when Home starts without a layout file.
