@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -544,6 +546,119 @@ static void outputs(void)
 			  "{\"action\":{\"a\":\"set\",\"props\":{\"category\":\"Office\"}},\"label\":\"Office\",\"meta\":\"5 apps\"}],\"t\":\"list\"}]");
 }
 
+static long long mono_ms(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* the event-loop API: run_start returns at once, run_step finishes it */
+static void stepping(void)
+{
+	char err[512];
+	struct manifest m;
+	const char *dirs[2] = { W("loop"), W("hello") };
+	for (int k = 0; k < 2; k++) {
+		CHECK(manifest_load(dirs[k], &m, err, sizeof err));
+		struct value *props = props_effective(&m, NULL);
+		struct run_opts opts = { .now = 1700000000, .home = home };
+		struct run_result r;
+		long long t0 = mono_ms();
+		struct run *run = run_start(&z, dirs[k], &m, props, &opts, &r);
+		CHECK(run != NULL);
+		CHECK(mono_ms() - t0 < 150); /* no waiting for the script */
+		CHECK(run_fd(run) >= 0);
+		int steps = 0;
+		while (!run_step(run)) {
+			struct pollfd p = { run_fd(run), POLLIN, 0 };
+			poll(&p, 1, run_timeout_ms(run));
+			steps++;
+		}
+		CHECK(run_done(run));
+		CHECK(run_fd(run) == -1);
+		CHECK(steps >= 1);
+		CHECK_INT(r.status, k == 0 ? RUN_TIME : RUN_OK);
+		run_free(run);
+		run_result_free(&r);
+		v_free(props);
+		manifest_free(&m);
+	}
+}
+
+/*
+ * A run keeps the reads it started with: Home rescans its catalog when a widget folder
+ * appears, which frees the manifest the run started from while the run is in flight.
+ * Here the same memory then holds another widget's manifest, with no reads at all.
+ */
+static void reads_outlive_manifest(void)
+{
+	char err[512];
+	struct manifest m;
+	CHECK(manifest_load(W("files"), &m, err, sizeof err));
+	struct value *props = props_effective(&m, NULL);
+	struct run_opts opts = { .now = 1700000000, .home = home };
+	struct run_result r;
+	struct run *run = run_start(&z, W("files"), &m, props, &opts, &r);
+	CHECK(run != NULL && !run_done(run));
+	manifest_free(&m);
+	CHECK(manifest_load(W("hello"), &m, err, sizeof err));
+	CHECK_INT(m.nreads, 0);
+	while (!run_step(run)) {
+		struct pollfd p = { run_fd(run), POLLIN, 0 };
+		poll(&p, 1, run_timeout_ms(run));
+	}
+	CHECK_INT(r.status, RUN_OK);
+	CHECK_STR(r.status == RUN_OK ? r.json.p : r.msg, "[{\"t\":\"text\",\"text\":\"read: hello\"}]");
+	CHECK_INT(r.nfiles, 1);
+	run_free(run);
+	run_result_free(&r);
+	v_free(props);
+	manifest_free(&m);
+}
+
+/*
+ * The zygote dies during a run (an OOM kill): the run ends as a crash at once instead
+ * of waiting on the zygote's hung-up socket forever, and later runs fail at once.
+ */
+static void helper_gone(void)
+{
+	struct zygote z2;
+	CHECK(zygote_start(&z2));
+	char err[512];
+	struct manifest m;
+	CHECK(manifest_load(W("hello"), &m, err, sizeof err));
+	struct value *props = props_effective(&m, NULL);
+	/* HOOK_BLOCK waits on its socket: only the zygote's death ends it before the wall clock */
+	struct run_opts opts = { .now = 1700000000, .home = home, .test_hook = HOOK_BLOCK, .wall_ms = 5000 };
+	struct run_result r;
+	struct run *run = run_start(&z2, W("hello"), &m, props, &opts, &r);
+	CHECK(run != NULL && !run_done(run));
+	kill(z2.pid, SIGKILL);
+	alarm(10); /* a run_step that never returns ends the suite here */
+	while (!run_step(run)) {
+		struct pollfd p = { run_fd(run), POLLIN, 0 };
+		poll(&p, 1, run_timeout_ms(run));
+	}
+	alarm(0);
+	CHECK(z2.gone);
+	CHECK_INT(r.status, RUN_CRASH);
+	CHECK_STR(r.msg, "stopped: Home's widget helper stopped; widgets run again when Home restarts");
+	run_free(run);
+	run_result_free(&r);
+	/* the next run doesn't wait: it is done when run_start returns */
+	opts.test_hook = 0;
+	run = run_start(&z2, W("hello"), &m, props, &opts, &r);
+	CHECK(run != NULL && run_done(run));
+	CHECK_INT(r.status, RUN_CRASH);
+	CHECK_STR(r.msg, "could not start the run: Home's widget helper stopped; widgets run again when Home restarts");
+	run_free(run);
+	run_result_free(&r);
+	v_free(props);
+	manifest_free(&m);
+	zygote_stop(&z2);
+}
+
 int main(void)
 {
 	if (!zygote_start(&z)) {
@@ -562,6 +677,9 @@ int main(void)
 	pausing();
 	boundary();
 	outputs();
+	stepping();
+	reads_outlive_manifest();
+	helper_gone();
 	zygote_stop(&z);
 	return t_done("sandbox");
 }

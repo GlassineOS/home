@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Mahjongg
+Icon=org.gnome.Mahjongg
+Exec=org.gnome.Mahjongg
+Categories=Game;BoardGame;

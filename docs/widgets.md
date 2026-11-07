@@ -3,8 +3,8 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 
 This is the widget format that `glassine-home` owns (spec 001, Contracts). Apps ship widgets against
-it; a breaking change raises the format number. Status: implemented with host tests; not yet run on a
-device, and Home does not draw widgets yet (the drawing comes with `GlassineOS/ui`).
+it; a breaking change raises the format number. Status: implemented with host tests, and drawn by `glassine-home`;
+not yet run on a device.
 
 A widget only describes what to show. Home draws it in the current voice and decides when it runs,
 so a widget can't animate, flash the panel or keep the CPU awake.
@@ -128,14 +128,20 @@ script set.
 Text must be valid UTF-8; control characters become spaces; longer text is cut at a character
 boundary.
 
-Actions: `ui.open(app, file)` (an app id, an optional absolute file path) and `ui.settings(page)`.
+Actions: `ui.open(app, file)` (an app id, an optional absolute file path; an id that isn't a
+desktop id matches the last part of one, case-insensitively, so `koreader` also finds
+`rocks.koreader.KOReader`, and the one opened last wins) and `ui.settings(page)`.
 Nothing else can run.
 
 Image slots: `src` is `file:PATH` (inside `reads`), `cover:PATH` (an ebook's cover: an absolute
-path without `.` or `..` parts, outside `/proc`, `/sys`, `/dev` and `/run`) or `icon:APP`;
+path without `.` or `..` parts, outside `/proc`, `/sys`, `/dev` and `/run`; Home shows the book's
+freedesktop thumbnail, as a file manager or KOReader makes it, and doesn't open the book) or `icon:APP`;
 no network sources. `h` (and `w` when `side` is set) are whole pixels from 1 to 2000; Home clamps
 them to the card. `side` is `"left"`, `"right"` or absent/`"none"` (full width); `fit` is `"cover"`
 (default) or `"contain"`; `alt` is required (shown in the dashed frame until the image is ready).
+A source is a still PNG, JPEG, WebP or GIF; Home reads its size from the file's header before it
+decodes anything. Another format, an animation (APNG, an animated WebP or GIF), a source over 20 MB
+or over 40 million pixels (8000 x 5000, say), or one that is broken, keeps the dashed frame.
 
 ## Settings: widget.edit.lua
 
@@ -172,6 +178,10 @@ socket, Home checks `reads`, opens the file beneath the read's directory without
 (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, or an `O_NOFOLLOW` walk where `openat2`
 is missing), refuses non-regular files, and passes the open file back. Home checks the run's
 output again; the run is untrusted.
+
+If the helper itself stops (an out-of-memory kill, say), Home exits with status 1 and the session
+starts it again with a new helper: the layout is kept in `home.conf`, while the page, Arrange mode
+and an open sheet start afresh. Home can't fork a new helper itself once it has threads.
 
 ## Trying a widget
 

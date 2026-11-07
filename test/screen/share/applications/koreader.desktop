@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=KOReader
+Icon=koreader
+Exec=koreader
+Categories=Office;Viewer;

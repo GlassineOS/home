@@ -14,7 +14,14 @@
 void broker_init(struct broker *b, const struct manifest *m, const char *home)
 {
 	memset(b, 0, sizeof *b);
-	b->m = m;
+	for (size_t i = 0; i < m->nreads && i < MAX_READS; i++) {
+		char *p = strdup(m->reads[i].path);
+		if (!p)
+			break;
+		b->reads[i].path = p;
+		b->reads[i].dir = m->reads[i].dir;
+		b->nreads = i + 1;
+	}
 	char pp[4096];
 	bool have = places_path(home, pp, sizeof pp);
 	if (!home)
@@ -32,6 +39,9 @@ void broker_free(struct broker *b)
 	for (size_t i = 0; i < b->nfiles; i++)
 		free(b->files[i]);
 	b->nfiles = 0;
+	for (size_t i = 0; i < b->nreads; i++)
+		free(b->reads[i].path);
+	b->nreads = 0;
 }
 
 static bool lexical_ok(const char *p, bool allow_trailing_slash)
@@ -103,8 +113,8 @@ static bool cover(const struct broker *b, const char *abs, char *root, size_t ro
 {
 	char e[MAX_PATH_LEN + 2200];
 	*place = false;
-	for (size_t i = 0; i < b->m->nreads; i++) {
-		const struct read_entry *r = &b->m->reads[i];
+	for (size_t i = 0; i < b->nreads; i++) {
+		const struct read_entry *r = &b->reads[i];
 		size_t pl;
 		if (!expand(b->home, &b->places, r->path, e, sizeof e, r->dir, &pl))
 			continue;

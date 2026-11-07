@@ -48,6 +48,13 @@ struct zygote {
 	/* exit statuses that arrived while waiting for something else */
 	struct { pid_t pid; int status; } done[16];
 	int ndone;
+	/*
+	 * Its socket hung up (killed, out of memory): a run in flight ends as a crash and
+	 * no run starts again. It isn't forked anew: Home has threads by then (sandbox.h's
+	 * rule for zygote_start), so glassine-home exits non-zero and the session starts it
+	 * again (home_helper_gone).
+	 */
+	bool gone;
 };
 
 /* Forks the zygote. Call first thing in main(), before threads or large allocations. */
@@ -88,8 +95,32 @@ struct run_result {
 };
 
 /*
+ * A run on Home's event loop, one step at a time:
+ *
+ *   struct run *run = run_start(z, dir, m, props, &o, &result);
+ *   while (!run_step(run))   // poll run_fd(run) for POLLIN, at most run_timeout_ms(run)
+ *       ...;
+ *   run_free(run);           // result stays in `result`
+ *
+ * run_start sends the request and returns at once; while the child runs, run_fd is its
+ * socket (file requests are served in run_step), afterwards the zygote's socket until
+ * the exit status arrives. run_timeout_ms is the time to the wall-clock backstop (or
+ * the reaping deadline): call run_step then even without input. One run at a time per
+ * zygote. run_start fails only on out-of-memory (NULL, message in result); other
+ * failures to start give a run that is already done.
+ */
+struct run;
+struct run *run_start(struct zygote *z, const char *dir, const struct manifest *m, const struct value *props,
+		      const struct run_opts *o, struct run_result *r);
+int run_fd(const struct run *run);
+int run_timeout_ms(const struct run *run);
+bool run_step(struct run *run);
+bool run_done(const struct run *run);
+void run_free(struct run *run);
+
+/*
  * Runs DIR/widget.lua (or widget.edit.lua) once with the given settings. Blocks until
- * the run ends; at most wall_ms plus a moment.
+ * the run ends; at most wall_ms plus a moment (run_start + run_step).
  */
 void run_widget(struct zygote *z, const char *dir, const struct manifest *m, const struct value *props,
 		const struct run_opts *o, struct run_result *r);

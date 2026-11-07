@@ -7,9 +7,11 @@
  * are 4 columns and 1, 2, 3 or 5 rows; landscape caps them at 3 rows.
  *
  * Rules, in list order:
- *  - A half goes into the first free half cell of the current page (lanes in order,
- *    rows top to bottom, left before right). That can be a gap before the flow
- *    position: a half fills the free half beside an earlier half.
+ *  - A half goes into the first free half cell of the lane the flow has reached (rows
+ *    top to bottom, left before right), else of a later lane, else of a new page. That
+ *    can be a gap before the flow position in the same lane (a half fills the free half
+ *    beside an earlier half), never in an earlier lane: once the flow has moved on to the
+ *    next lane, the gaps behind it stay empty.
  *  - Anything 4 columns wide goes at the flow position (the row after the last
  *    row used in the current lane) if it fits, else at the top of the next lane,
  *    else at the top of a new page. Full-width widgets never move back into gaps,

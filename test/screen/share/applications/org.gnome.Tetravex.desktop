@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Tetravex
+Icon=org.gnome.Tetravex
+Exec=org.gnome.Tetravex
+Categories=Game;LogicGame;

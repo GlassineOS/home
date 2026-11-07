@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "Updates"
+icon = "system_update"
+description = "Updates waiting to be installed."
+sizes = ["half"]
+reads = ["~/data/updates.lua"]
+refresh = { on_change = true }
