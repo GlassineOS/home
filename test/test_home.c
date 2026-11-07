@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <math.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <sys/resource.h>
@@ -792,6 +793,43 @@ static void frames_busy(void)
 	CHECK_INT(frames_pick(&f), 1);
 	frames_shown(&f, 1);
 	CHECK(!f.b[1].all && !f.sall);
+
+	/* the re-review's sequence: buffer 0 is held while the canvas turns 70 x 88 -> 88 x 70,
+	 * paints twice there and turns back; buffer 0 is the old size again but copies whole,
+	 * not a rect from the wide canvas */
+	frames_init(&f);
+	frames_canvas(&f, 70, 88);
+	CHECK_INT(frames_pick(&f), 0);
+	frames_shown(&f, 0);
+	frames_canvas(&f, 88, 70);
+	CHECK(f.b[0].all && f.b[1].all && f.sall);
+	struct rect wide = { 80, 0, 8, 8 };
+	frames_damage(&f, &wide, 1);
+	CHECK_INT(frames_pick(&f), 1);
+	frames_shown(&f, 1);
+	frames_released(&f, 1);
+	frames_damage(&f, &wide, 1);
+	CHECK_INT(frames_pick(&f), 1);
+	frames_shown(&f, 1);
+	frames_canvas(&f, 70, 88);
+	frames_released(&f, 0);
+	CHECK_INT(frames_pick(&f), 0);
+	CHECK(f.b[0].all && f.b[0].ndmg == 0 && f.sall);
+	frames_canvas(&f, 70, 88); /* the same size: nothing changes */
+	frames_shown(&f, 0);
+	frames_canvas(&f, 70, 88);
+	CHECK(!f.b[0].all && !f.sall);
+
+	/* a rect is clipped to the buffer; one outside it or empty is skipped */
+	int x0, y0, x1, y1;
+	CHECK(!frames_clip(&wide, 70, 88, &x0, &y0, &x1, &y1));
+	CHECK(frames_clip(&(struct rect){ -5, -5, 10, 10 }, 70, 88, &x0, &y0, &x1, &y1));
+	CHECK(x0 == 0 && y0 == 0 && x1 == 5 && y1 == 5);
+	CHECK(frames_clip(&(struct rect){ 60, 80, 20, 20 }, 70, 88, &x0, &y0, &x1, &y1));
+	CHECK(x0 == 60 && y0 == 80 && x1 == 70 && y1 == 88);
+	CHECK(!frames_clip(&(struct rect){ 10, 10, 0, 5 }, 70, 88, &x0, &y0, &x1, &y1));
+	CHECK(!frames_clip(&(struct rect){ 10, 90, 5, 5 }, 70, 88, &x0, &y0, &x1, &y1));
+	CHECK(!frames_clip(&(struct rect){ NAN, 0, 5, 5 }, 70, 88, &x0, &y0, &x1, &y1));
 }
 
 /* ---- image limits: a source's pixels, not its bytes, decide what decoding costs ------- */

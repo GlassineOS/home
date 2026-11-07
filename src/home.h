@@ -225,9 +225,17 @@ struct frames {
 	int nsdmg;
 	bool sall;
 	bool owed;
+	int cw, ch; /* the canvas the lists are in */
 };
 void frames_init(struct frames *f);
+/*
+ * The canvas is w x h. After a change of size every buffer copies it whole and the
+ * surface damages all of it: a list from the old size doesn't fit the new one.
+ */
+void frames_canvas(struct frames *f, int w, int h);
 void frames_damage(struct frames *f, const struct rect *r, int n);
+/* r within a w x h buffer, as whole pixels [x0, x1) x [y0, y1); false when nothing is left */
+bool frames_clip(const struct rect *r, int w, int h, int *x0, int *y0, int *x1, int *y1);
 /* A free buffer, or -1: then the frame is owed. */
 int frames_pick(struct frames *f);
 /* Buffer i was committed: it is busy, and nothing is left to copy or damage. */

@@ -25,6 +25,33 @@ void frames_init(struct frames *f)
 		f->b[i].all = true; /* never shown: copied whole */
 }
 
+void frames_canvas(struct frames *f, int w, int h)
+{
+	if (w == f->cw && h == f->ch)
+		return;
+	f->cw = w;
+	f->ch = h;
+	for (int i = 0; i < FRAME_BUFFERS; i++) {
+		f->b[i].ndmg = 0;
+		f->b[i].all = true;
+	}
+	f->nsdmg = 0;
+	f->sall = true;
+}
+
+bool frames_clip(const struct rect *r, int w, int h, int *x0, int *y0, int *x1, int *y1)
+{
+	double a = r->x < 0 ? 0 : r->x, b = r->y < 0 ? 0 : r->y;
+	double c = r->x + r->w > w ? w : r->x + r->w, d = r->y + r->h > h ? h : r->y + r->h;
+	if (!(c > a && d > b)) /* empty, outside, or not a number */
+		return false;
+	*x0 = (int)a;
+	*y0 = (int)b;
+	*x1 = (int)c;
+	*y1 = (int)d;
+	return *x1 > *x0 && *y1 > *y0;
+}
+
 void frames_damage(struct frames *f, const struct rect *r, int n)
 {
 	for (int i = 0; i < n; i++) {

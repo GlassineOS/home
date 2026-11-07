@@ -106,13 +106,12 @@ static bool buf_make(struct buffer *b, int w, int h)
 	return true;
 }
 
+/* the canvas is the buffer's size here (present), so a rect clipped to one fits both */
 static void copy_rect(struct buffer *b, const unsigned char *src, int sstride, const struct rect *r)
 {
-	int x0 = (int)r->x, y0 = (int)r->y, x1 = (int)(r->x + r->w), y1 = (int)(r->y + r->h);
-	if (x1 > b->w)
-		x1 = b->w;
-	if (y1 > b->h)
-		y1 = b->h;
+	int x0, y0, x1, y1;
+	if (!frames_clip(r, b->w, b->h, &x0, &y0, &x1, &y1))
+		return;
 	for (int y = y0; y < y1; y++)
 		memcpy((char *)b->data + (size_t)y * b->stride + x0 * 4, src + (size_t)y * sstride + x0 * 4, (size_t)(x1 - x0) * 4);
 }
@@ -123,11 +122,12 @@ static void present(void)
 	struct home *h = W.h;
 	if (!W.configured || !h->cur)
 		return; /* a new canvas is coming, and its paint damages everything */
+	int dw = cairo_image_surface_get_width(h->cur), dh = cairo_image_surface_get_height(h->cur);
+	frames_canvas(&W.f, dw, dh);
 	int i = frames_pick(&W.f);
 	if (i < 0)
 		return;
 	struct buffer *b = &W.buf[i];
-	int dw = cairo_image_surface_get_width(h->cur), dh = cairo_image_surface_get_height(h->cur);
 	if (b->w != dw || b->h != dh) {
 		if (!buf_make(b, dw, dh))
 			return;
