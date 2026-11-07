@@ -141,6 +141,10 @@ static void cards_sync(struct home *h)
 	struct card *nc = calloc(h->conf.n ? h->conf.n : 1, sizeof *nc);
 	if (!nc)
 		return;
+	/* a run in flight follows its instance, not its index: a remove or a swap reorders */
+	char run_uuid[37] = "";
+	if (h->run && h->run_card >= 0 && (size_t)h->run_card < h->ncards)
+		snprintf(run_uuid, sizeof run_uuid, "%s", h->cards[h->run_card].uuid);
 	for (size_t i = 0; i < h->conf.n; i++) {
 		const struct instance *in = &h->conf.w[i];
 		struct card *c = &nc[i];
@@ -181,6 +185,7 @@ static void cards_sync(struct home *h)
 	free(h->cards);
 	h->cards = nc;
 	h->ncards = h->conf.n;
+	h->run_card = run_uuid[0] ? conf_find(&h->conf, run_uuid) : -1; /* -1: removed, the result is dropped */
 	if (h->sheet == SHEET_SETTINGS && (h->sheet_card < 0 || (size_t)h->sheet_card >= h->ncards))
 		h->sheet = SHEET_NONE;
 }

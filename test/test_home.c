@@ -547,6 +547,46 @@ static bool start_run(struct home *h, int card)
 	return h->run && h->run_card == card;
 }
 
+/* every card's last output, by instance */
+struct outputs {
+	size_t n;
+	char uuid[16][37];
+	char *json[16];
+};
+
+static void outputs_of(const struct home *h, struct outputs *o)
+{
+	o->n = 0;
+	for (size_t i = 0; i < h->ncards && i < 16; i++, o->n++) {
+		snprintf(o->uuid[i], sizeof o->uuid[i], "%s", h->cards[i].uuid);
+		struct buf j = { 0 };
+		if (h->cards[i].desc)
+			v_to_json(h->cards[i].desc, &j);
+		o->json[i] = strdup(j.p ? j.p : "");
+		buf_free(&j);
+	}
+}
+
+/* each card still in h shows what it showed in before */
+static void same_outputs(const struct home *h, const struct outputs *before)
+{
+	struct outputs now;
+	outputs_of(h, &now);
+	for (size_t i = 0; i < now.n; i++)
+		for (size_t k = 0; k < before->n; k++)
+			if (!strcmp(now.uuid[i], before->uuid[k]))
+				CHECK_STR(now.json[i], before->json[k]);
+	for (size_t i = 0; i < now.n; i++)
+		free(now.json[i]);
+}
+
+static void outputs_free(struct outputs *o)
+{
+	for (size_t i = 0; i < o->n; i++)
+		free(o->json[i]);
+	o->n = 0;
+}
+
 static void in_flight(struct zygote *z)
 {
 	setenv("GLASSINE_HOME_VOICE", "white", 1);
@@ -580,6 +620,31 @@ static void in_flight(struct zygote *z)
 	v_to_json(h.cards[C_PHOTO].desc, &j);
 	CHECK(j.p && strstr(j.p, "Pictures/Frame/elbe.png") != NULL);
 	buf_free(&j);
+
+	/* Arrange swaps Notes and Calendar while Notes runs: the result goes to Notes,
+	 * now at Calendar's index, and Calendar keeps its own */
+	CHECK(tap(&h, A_ARRANGE, -1, NULL));
+	struct outputs before;
+	outputs_of(&h, &before);
+	CHECK(strcmp(before.json[C_NOTES], before.json[C_CAL]) != 0);
+	CHECK(start_run(&h, C_NOTES));
+	CHECK(tap(&h, A_SWAP, C_NOTES, NULL));
+	CHECK_STR(h.cards[C_CAL].uuid, before.uuid[C_NOTES]); /* swapped */
+	CHECK_INT(h.run_card, C_CAL);
+	loop(&h, true, 0, -1, NULL);
+	CHECK_INT(h.cards[C_CAL].st.last, RUN_OK);
+	same_outputs(&h, &before);
+
+	/* Notes (now at index C_CAL) is removed while it runs: its result goes nowhere,
+	 * and the card that takes its index keeps its own output */
+	home_paint(&h, true);
+	CHECK(start_run(&h, C_CAL));
+	CHECK(tap(&h, A_CTL_REMOVE, C_CAL, NULL));
+	CHECK_INT(h.ncards, before.n - 1);
+	CHECK_INT(h.run_card, -1);
+	loop(&h, true, 0, -1, NULL);
+	same_outputs(&h, &before);
+	outputs_free(&before);
 
 	home_free(&h);
 	setenv("GLASSINE_HOME_USER_WIDGETS", was, 1);
