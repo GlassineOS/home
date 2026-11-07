@@ -8,11 +8,12 @@
  *
  * Sources: file:PATH (a file the widget's reads cover; the description check made
  * sure), cover:BOOK (the book's freedesktop thumbnail), icon:APP (the app's icon,
- * drawn on the main thread: the icon index belongs to it). Over 20 MB or broken: the
- * slot keeps its dashed frame and alt text.
+ * drawn on the main thread: the icon index belongs to it). Over 20 MB, over 40 million
+ * pixels or broken: the slot keeps its dashed frame and alt text.
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,19 +101,37 @@ static void dither(unsigned char *g, int w, int h, int mode)
 		}
 }
 
-struct fit { int w, h; bool contain; };
+bool img_decode_size(int sw, int sh, int w, int h, bool contain, long long max_px, int *tw, int *th)
+{
+	if (sw <= 0 || sh <= 0 || w <= 0 || h <= 0 || (long long)sw * sh > max_px)
+		return false;
+	double sx = (double)w / sw, sy = (double)h / sh, sc = contain ? fmin(sx, sy) : fmax(sx, sy);
+	*tw = sw;
+	*th = sh;
+	if (sc < 1) {
+		int a = (int)(sw * sc + 0.5), b = (int)(sh * sc + 0.5);
+		*tw = a < 1 ? 1 : a;
+		*th = b < 1 ? 1 : b;
+	}
+	return true;
+}
+
+struct fit { int w, h; bool contain; long long max_px; bool refused; };
 
 static void size_prepared(GdkPixbufLoader *l, int sw, int sh, gpointer ud)
 {
 	struct fit *f = ud;
-	if (sw <= 0 || sh <= 0)
+	int tw, th;
+	if (!img_decode_size(sw, sh, f->w, f->h, f->contain, f->max_px, &tw, &th)) {
+		f->refused = true;
+		gdk_pixbuf_loader_set_size(l, 0, 0); /* the loaders' sign to stop (gdk_pixbuf_get_file_info's) */
 		return;
-	double sx = (double)f->w / sw, sy = (double)f->h / sh, sc = f->contain ? (sx < sy ? sx : sy) : (sx > sy ? sx : sy);
-	int tw = (int)(sw * sc + 0.5), th = (int)(sh * sc + 0.5);
-	gdk_pixbuf_loader_set_size(l, tw < 1 ? 1 : tw, th < 1 ? 1 : th);
+	}
+	if (tw != sw || th != sh)
+		gdk_pixbuf_loader_set_size(l, tw, th);
 }
 
-static unsigned char *prepare(int fd, int w, int h, bool contain, int dmode)
+unsigned char *img_prepare(int fd, int w, int h, bool contain, int dmode, long long max_px)
 {
 	struct stat st;
 	if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size > IMAGE_MAX_BYTES)
@@ -129,7 +148,7 @@ static unsigned char *prepare(int fd, int w, int h, bool contain, int dmode)
 		free(data);
 		return NULL;
 	}
-	struct fit f = { w, h, contain };
+	struct fit f = { w, h, contain, max_px, false };
 	GdkPixbufLoader *l = gdk_pixbuf_loader_new();
 	g_signal_connect(l, "size-prepared", G_CALLBACK(size_prepared), &f);
 	GError *err = NULL;
@@ -140,40 +159,49 @@ static unsigned char *prepare(int fd, int w, int h, bool contain, int dmode)
 		g_error_free(err);
 	}
 	free(data);
-	GdkPixbuf *pb = ok ? gdk_pixbuf_loader_get_pixbuf(l) : NULL;
+	GdkPixbuf *pb = ok && !f.refused ? gdk_pixbuf_loader_get_pixbuf(l) : NULL;
 	if (pb)
 		g_object_ref(pb);
 	g_object_unref(l);
 	if (!pb)
 		return NULL;
-	unsigned char *g = malloc((size_t)w * h);
+	/*
+	 * Into the slot: scaled to the fit and centred, in one step from the decoded picture,
+	 * so cover crops without a scaled copy of the whole source. Decoded at the fit's size
+	 * already (s == 1), it is a copy at whole-pixel offsets.
+	 */
+	int pw = gdk_pixbuf_get_width(pb), ph = gdk_pixbuf_get_height(pb);
+	double sx = (double)w / pw, sy = (double)h / ph, s = contain ? fmin(sx, sy) : fmax(sx, sy);
+	int rw = contain ? (int)(pw * s + 0.5) : w, rh = contain ? (int)(ph * s + 0.5) : h;
+	rw = rw < 1 ? 1 : rw > w ? w : rw;
+	rh = rh < 1 ? 1 : rh > h ? h : rh;
+	int dx = (w - rw) / 2, dy = (h - rh) / 2;
+	double ox = s == 1 ? (double)((w - pw) / 2) : (w - pw * s) / 2;
+	double oy = s == 1 ? (double)((h - ph) / 2) : (h - ph * s) / 2;
+	bool alpha = gdk_pixbuf_get_has_alpha(pb);
+	GdkPixbuf *slot = gdk_pixbuf_new(GDK_COLORSPACE_RGB, alpha, 8, w, h);
+	unsigned char *g = slot ? malloc((size_t)w * h) : NULL;
 	if (!g) {
+		if (slot)
+			g_object_unref(slot);
 		g_object_unref(pb);
 		return NULL;
 	}
+	gdk_pixbuf_scale(pb, slot, dx, dy, rw, rh, ox, oy, s, s, GDK_INTERP_BILINEAR);
+	g_object_unref(pb);
 	memset(g, 255, (size_t)w * h);
-	int pw = gdk_pixbuf_get_width(pb), ph = gdk_pixbuf_get_height(pb), rs = gdk_pixbuf_get_rowstride(pb);
-	int nc = gdk_pixbuf_get_n_channels(pb);
-	bool alpha = gdk_pixbuf_get_has_alpha(pb);
-	const unsigned char *px = gdk_pixbuf_read_pixels(pb);
-	int ox = (w - pw) / 2, oy = (h - ph) / 2; /* cover: negative, the middle is kept */
-	for (int y = 0; y < h; y++) {
-		int py = y - oy;
-		if (py < 0 || py >= ph)
-			continue;
-		for (int x = 0; x < w; x++) {
-			int qx = x - ox;
-			if (qx < 0 || qx >= pw)
-				continue;
-			const unsigned char *p = px + (size_t)py * rs + (size_t)qx * nc;
+	int rs = gdk_pixbuf_get_rowstride(slot), nc = gdk_pixbuf_get_n_channels(slot);
+	const unsigned char *px = gdk_pixbuf_read_pixels(slot);
+	for (int y = dy; y < dy + rh; y++)
+		for (int x = dx; x < dx + rw; x++) {
+			const unsigned char *p = px + (size_t)y * rs + (size_t)x * nc;
 			/* luminance (Rec. 709), over white */
 			float l = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
 			if (alpha)
 				l = l * p[3] / 255.0f + 255.0f * (1 - p[3] / 255.0f);
 			g[y * w + x] = (unsigned char)(l + 0.5f);
 		}
-	}
-	g_object_unref(pb);
+	g_object_unref(slot);
 	if (dmode)
 		dither(g, w, h, dmode);
 	return g;
@@ -260,7 +288,7 @@ static void *worker(void *arg)
 		pthread_mutex_unlock(&q->mu);
 		j->grey = disk_get(j->key, j->w, j->h);
 		if (!j->grey) {
-			j->grey = prepare(j->fd, j->w, j->h, j->contain, j->dither);
+			j->grey = img_prepare(j->fd, j->w, j->h, j->contain, j->dither, IMAGE_MAX_SOURCE_PX);
 			if (j->grey)
 				disk_put(j->key, j->grey, j->w, j->h);
 		}

@@ -10,9 +10,11 @@
  * reading's KOReader data from test/fixtures/reading. Pictures are drawn here.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <poll.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -650,6 +652,82 @@ static void in_flight(struct zygote *z)
 	setenv("GLASSINE_HOME_USER_WIDGETS", was, 1);
 }
 
+/* ---- image limits: a source's pixels, not its bytes, decide what decoding costs ------- */
+
+static long peak_rss_kb(void)
+{
+	struct rusage ru;
+	getrusage(RUSAGE_SELF, &ru);
+	return ru.ru_maxrss;
+}
+
+static unsigned char *prepare_file(const char *path, int w, int h, bool contain, long long max_px)
+{
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	CHECK(fd >= 0);
+	unsigned char *g = fd >= 0 ? img_prepare(fd, w, h, contain, 0, max_px) : NULL;
+	if (fd >= 0)
+		close(fd);
+	return g;
+}
+
+static void image_limits(void)
+{
+	int tw = 0, th = 0;
+	/* a long thin source for a cover slot decodes at its own size, never slot x aspect */
+	CHECK(img_decode_size(1, 4000, 300, 300, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(tw == 1 && th == 4000);
+	/* a photo shrinks to the fit: cover overflows one side (cropped later), contain fits */
+	CHECK(img_decode_size(6000, 4000, 132, 78, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(tw == 132 && th == 88);
+	CHECK(img_decode_size(6000, 4000, 132, 78, true, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(tw == 117 && th == 78);
+	/* small sources aren't enlarged at decoding */
+	CHECK(img_decode_size(100, 100, 300, 300, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(tw == 100 && th == 100);
+	/* the pixel limit: 40 million is in, one row more is out; 16000 x 16000 is out */
+	CHECK(img_decode_size(8000, 5000, 300, 300, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(!img_decode_size(8000, 5001, 300, 300, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(!img_decode_size(16000, 16000, 300, 300, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+	CHECK(!img_decode_size(0, 10, 300, 300, false, IMAGE_MAX_SOURCE_PX, &tw, &th));
+
+	/* a 1 x 4000 PNG, white with a black band in the middle rows, in a 300 x 300 cover slot:
+	 * the middle is kept, and decoding it costs little (it took about 1 GB) */
+	char p[2048];
+	snprintf(p, sizeof p, "%s/thin.png", T);
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_RGB24, 1, 4000);
+	cairo_t *cr = cairo_create(s);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_paint(cr);
+	cairo_rectangle(cr, 0, 1990, 1, 20);
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_fill(cr);
+	cairo_destroy(cr);
+	CHECK(cairo_surface_write_to_png(s, p) == CAIRO_STATUS_SUCCESS);
+	cairo_surface_destroy(s);
+	long before = peak_rss_kb();
+	unsigned char *g = prepare_file(p, 300, 300, false, IMAGE_MAX_SOURCE_PX);
+	CHECK(g != NULL);
+	CHECK(peak_rss_kb() - before < 100 * 1024);
+	int darkest = 0, lightest = 0;
+	for (int i = 0; g && i < 300 * 300; i++) {
+		darkest += g[i] < 8;
+		lightest = g[i] > lightest ? g[i] : lightest;
+	}
+	CHECK_INT(darkest, 300 * 300);
+	CHECK(lightest < 8);
+	free(g);
+
+	/* over the limit, a well-formed image is refused by the loader in use (the limit is
+	 * passed small here); under it, the same file decodes */
+	snprintf(p, sizeof p, "%s/meadow.png", T);
+	picture(p, 200, 150, 1);
+	CHECK(prepare_file(p, 100, 75, false, 200 * 150 - 1) == NULL);
+	g = prepare_file(p, 100, 75, false, 200 * 150);
+	CHECK(g != NULL);
+	free(g);
+}
+
 int main(void)
 {
 	setup();
@@ -665,6 +743,7 @@ int main(void)
 			boards(&z, voices[v], l);
 	commands(&z);
 	in_flight(&z);
+	image_limits();
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

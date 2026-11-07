@@ -41,6 +41,8 @@
 #define MAX_REGIONS 128
 #define MAX_DAMAGE 64
 #define IMAGE_MAX_BYTES (20 * 1024 * 1024)
+/* sources over this many pixels aren't decoded (dashed frame): memory follows the pixels, not the bytes */
+#define IMAGE_MAX_SOURCE_PX (40LL * 1000 * 1000)
 
 struct rect { double x, y, w, h; };
 
@@ -220,5 +222,14 @@ bool imgq_collect(struct home *h);
 void img_clear(struct img *im);
 /* The book's freedesktop thumbnail (large first), for cover: sources. */
 bool img_cover_path(const char *book, char *out, size_t len);
+/*
+ * The size a sw x sh source is decoded at for a w x h slot: shrunk to the fit (cover or
+ * contain) when that is smaller, else the source's own size, never larger. Cover is
+ * cropped from it afterwards, so a long thin source never decodes to slot x aspect.
+ * False for a source over max_px pixels (IMAGE_MAX_SOURCE_PX; tests pass less).
+ */
+bool img_decode_size(int sw, int sh, int w, int h, bool contain, long long max_px, int *tw, int *th);
+/* The worker's job for one slot: w x h greys (0 = black), or NULL (broken, too large). */
+unsigned char *img_prepare(int fd, int w, int h, bool contain, int dmode, long long max_px);
 
 #endif

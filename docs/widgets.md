@@ -139,6 +139,8 @@ freedesktop thumbnail, as a file manager or KOReader makes it, and doesn't open 
 no network sources. `h` (and `w` when `side` is set) are whole pixels from 1 to 2000; Home clamps
 them to the card. `side` is `"left"`, `"right"` or absent/`"none"` (full width); `fit` is `"cover"`
 (default) or `"contain"`; `alt` is required (shown in the dashed frame until the image is ready).
+A source over 20 MB or over 40 million pixels (8000 x 5000, say), or one that is broken, keeps the
+dashed frame.
 
 ## Settings: widget.edit.lua
 
