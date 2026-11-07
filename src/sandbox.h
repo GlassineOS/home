@@ -33,6 +33,7 @@ enum {
 	HOOK_OPEN = 3,   /* open() a file */
 	HOOK_BLOCK = 4,  /* block in recvmsg on the socket: only the wall backstop ends it */
 	HOOK_FORK = 5,   /* fork() */
+	HOOK_FLOOD = 6,  /* ask for files without reading the answers, then wait without using CPU */
 };
 
 struct zygote {
@@ -54,7 +55,7 @@ enum run_status {
 	RUN_MEMORY,     /* over the memory budget */
 	RUN_TIMEOUT,    /* the wall-clock backstop killed it */
 	RUN_BLOCKED,    /* the seccomp filter killed it (a forbidden system call) */
-	RUN_CRASH,      /* died some other way */
+	RUN_CRASH,      /* died some other way, or stopped reading Home's answers */
 };
 
 struct run_opts {

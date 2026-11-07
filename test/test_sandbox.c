@@ -346,6 +346,16 @@ static void limits(void)
 	/* a run that blocks without using CPU: the wall backstop kills it */
 	o = run(W("hello"), NULL, HOOK_BLOCK, false, false, NULL);
 	CHECK_INT(o.status, RUN_TIMEOUT);
+	/*
+	 * a run that asks for files and never reads the answers: Home must not block
+	 * sending them, or the wall backstop would never run. The alarm turns a hang into
+	 * a failure.
+	 */
+	alarm(60);
+	o = run(W("hello"), NULL, HOOK_FLOOD, false, false, NULL);
+	alarm(0);
+	CHECK_INT(o.status, RUN_CRASH);
+	CHECK_STR(o.text, "stopped: it asked for files without reading the answers");
 }
 
 /* real failing runs: the last good output stays, the third failure in a row pauses */

@@ -140,7 +140,27 @@ static bool wait_exit(struct zygote *z, pid_t want, int *status, int timeout_ms)
 	}
 }
 
-static void reply_fd(int s, struct broker *b, const char *path)
+/*
+ * Answers to the child never wait: a child reads each answer before it asks again, so
+ * a full socket means it stopped reading, and blocking here would stop the wall clock
+ * too. Returns false when the answer couldn't be queued for that reason.
+ */
+static bool answer(int s, struct msghdr *mh)
+{
+	ssize_t n;
+	while ((n = sendmsg(s, mh, MSG_NOSIGNAL | MSG_DONTWAIT)) < 0 && errno == EINTR)
+		;
+	return n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK);
+}
+
+static bool answer_text(int s, const char *m, size_t n)
+{
+	struct iovec iov = { (void *)m, n };
+	struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+	return answer(s, &mh);
+}
+
+static bool reply_fd(int s, struct broker *b, const char *path)
 {
 	long long size = 0;
 	int fd = broker_open(b, path, &size);
@@ -157,9 +177,9 @@ static void reply_fd(int s, struct broker *b, const char *path)
 		c->cmsg_type = SCM_RIGHTS;
 		c->cmsg_len = CMSG_LEN(sizeof(int));
 		memcpy(CMSG_DATA(c), &fd, sizeof fd);
-		sendmsg(s, &mh, MSG_NOSIGNAL);
+		bool sent = answer(s, &mh);
 		close(fd);
-		return;
+		return sent;
 	}
 	int e = errno;
 	char m[300];
@@ -171,7 +191,7 @@ static void reply_fd(int s, struct broker *b, const char *path)
 			: e == ENOENT ? "no such file"
 			: strerror(e);
 	int n = snprintf(m, sizeof m, "%c%c%s", MSG_NOFD, denied ? 'd' : 'n', why);
-	send(s, m, (size_t)n, MSG_NOSIGNAL);
+	return answer_text(s, m, (size_t)n);
 }
 
 void run_widget(struct zygote *z, const char *dir, const struct manifest *m, const struct value *props,
@@ -229,7 +249,7 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 	broker_init(&b, m, o->home);
 	b.force_fallback = o->force_fallback;
 	int wall = o->wall_ms ? o->wall_ms : RUN_WALL_MS;
-	bool killed = false, got_final = false;
+	bool killed = false, stalled = false, got_final = false;
 	char *msg = malloc(DESC_MAX_JSON + 16);
 	for (;;) {
 		long long left = start + wall - now_ms();
@@ -249,10 +269,13 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 			break; /* the child is gone */
 		msg[n] = 0;
 		if (msg[0] == MSG_OPEN) {
-			if (memchr(msg + 1, 0, (size_t)n - 1))
-				send(sv[0], "Nd" "not a valid path", 18, MSG_NOSIGNAL);
-			else
-				reply_fd(sv[0], &b, msg + 1);
+			bool sent = memchr(msg + 1, 0, (size_t)n - 1) ? answer_text(sv[0], "Nd" "not a valid path", 18)
+								     : reply_fd(sv[0], &b, msg + 1);
+			if (!sent) {
+				kill(pid, SIGKILL);
+				stalled = true;
+				break;
+			}
 		} else if (msg[0] == MSG_PRINT) {
 			if (r->nlog < RUN_MAX_LOG && utf8_valid(msg + 1, (size_t)n - 1))
 				r->log[r->nlog++] = strdup(msg + 1);
@@ -292,6 +315,10 @@ void run_widget(struct zygote *z, const char *dir, const struct manifest *m, con
 		run_result_free(r);
 		r->status = RUN_TIMEOUT;
 		snprintf(r->msg, sizeof r->msg, "stopped after %d ms", wall);
+	} else if (stalled) {
+		run_result_free(r);
+		r->status = RUN_CRASH;
+		snprintf(r->msg, sizeof r->msg, "stopped: it asked for files without reading the answers");
 	} else if (WIFSIGNALED(status)) {
 		int sig = WTERMSIG(status);
 		v_free(r->desc);

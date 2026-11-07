@@ -677,6 +677,7 @@ static int msgh(lua_State *L)
 }
 
 #ifdef GH_TEST_HOOKS
+#include <linux/futex.h>
 #include <sys/syscall.h>
 static void test_hook(int hook)
 {
@@ -687,6 +688,16 @@ static void test_hook(int hook)
 	case HOOK_BLOCK: { char c; struct iovec iov = { &c, 1 }; struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
 		recvmsg(sock, &mh, 0); break; }
 	case HOOK_FORK: fork(); break;
+	case HOOK_FLOOD: {
+		static const char m[] = "O/nonexistent";
+		struct iovec iov = { (void *)m, sizeof m - 1 };
+		struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+		for (int i = 0; i < 5000; i++)
+			sendmsg(sock, &mh, MSG_NOSIGNAL);
+		int w = 0;
+		syscall(SYS_futex, &w, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0);
+		break;
+	}
 	default: break;
 	}
 }
