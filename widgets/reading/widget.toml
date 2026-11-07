@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Continue reading: the book read last in KOReader.
+name = "Continue reading"
+icon = "menu_book"
+description = "The book you read last in KOReader, with its progress."
+sizes = ["wide", "half"]
+# KOReader's history, and the user's books folder (KOReader keeps BOOK.sdr/ beside each book).
+reads = ["~/.config/koreader/history.lua", "{books}/"]
+refresh = { on_change = true }

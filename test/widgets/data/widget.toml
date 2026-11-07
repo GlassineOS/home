@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "data"
+icon = "science"
+sizes = ["wide"]
+reads = ["~/data/"]
+[props]
+file = "plain.lua"

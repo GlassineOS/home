@@ -10,5 +10,5 @@ jobs:
       - name: make check on Alpine
         run: |
           docker run --rm -v "$PWD":/src -w /src alpine:3.24 sh -euc '
-            apk add -q build-base
+            apk add -q build-base lua5.4-dev pkgconf linux-headers
             make check'

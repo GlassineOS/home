@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "Hello"
+icon = "waving_hand"
+sizes = ["half"]
+[props]
+who = "world"

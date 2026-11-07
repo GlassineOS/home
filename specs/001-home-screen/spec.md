@@ -95,7 +95,8 @@ later with one partial refresh of that rectangle only; nothing else moves.
 **Widgets**
 - **FR-020**: A widget is a folder holding a manifest (data) and a render script; optionally a settings script.
   Home never runs code to list, describe or add a widget.
-- **FR-021**: The manifest declares name, icon, sizes (the first is the default), the files it reads, when it
+- **FR-021**: The manifest declares name, icon, sizes (the first is the default), the files it reads (fixed
+  paths, or paths inside a named place, FR-028), when it
   refreshes (when a listed file changes and/or an interval of at
   least 15 minutes) and its settings with their defaults.
 - **FR-022**: The render script returns a description built from seven primitives only: title (one line, at most
@@ -122,6 +123,13 @@ later with one partial refresh of that rectangle only; nothing else moves.
   ready shows a dashed frame with its alt text. Results are cached by source, its date or ETag, slot size and
   dithering. Sources are local only: a listed file, an ebook's cover, an app's icon. Over 20 MB or
   broken: the frame and alt text stay.
+- **FR-028**: Places: a read may start with a named place instead of a fixed folder. The one place so far is
+  the user's books folder (`{books}`), a user setting that defaults to `~/Books`; a widget may read all of it
+  (KOReader's book metadata lives beside the books). Home resolves the place from the setting before it checks
+  the reads, and the same rules apply inside it (no links followed, nothing outside it). An unknown place name
+  makes the manifest invalid. When the place is unset, missing, a link, or points into the system's own areas,
+  reads inside it fail; Home never falls back to a wider folder. The built-in Continue reading widget reads
+  `{books}/`.
 
 **Arranging**
 - **FR-030**: Arrange as in Scenario 3; tapping a peek turns to that page; the page being arranged moves with a
@@ -145,6 +153,7 @@ later with one partial refresh of that rectangle only; nothing else moves.
 | The voices' drawing library | consumed | 1 | `GlassineOS/ui` |
 | KOReader history and book metadata (read only) | consumed | KOReader's current format | KOReader |
 | The E-ink dithering setting | consumed | as Settings writes it | spec of Settings › E-ink |
+| Places (the user's books folder; a user-level setting Settings can later own) | owned | 1 | this repository, `docs/widgets.md` |
 
 ## Device scope and risk
 
@@ -155,6 +164,8 @@ Device-neutral (grid and sizes follow the screen's logical size). No device risk
 - Host: packing tests (adding, resizing, moving, spilling, closing pages) in both orientations.
 - Host: sandbox tests: a widget can't read an unlisted file, follow a link out of its reads, run code from a
   data file, reach the network, exceed 200 ms or 4 MB; three failures pause it.
+- Host: places: the default, a set folder, an unset or missing one, an unknown name, a place that is a link or
+  points into system areas (refused); Continue reading with a library outside `~/Books`.
 - Host: renders of every `home.*` board state in three voices and both orientations.
 - Hardware (supervised): Home from the bar, open an app, Arrange, add a widget, Continue reading with a real book.
 

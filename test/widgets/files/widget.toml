@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name = "files"
+icon = "science"
+sizes = ["wide"]
+reads = ["~/data/", "~/single.txt"]
+[props]
+path = "~/data/ok.txt"
