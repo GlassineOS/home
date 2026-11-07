@@ -34,6 +34,7 @@ enum {
 	HOOK_BLOCK = 4,  /* block in recvmsg on the socket: only the wall backstop ends it */
 	HOOK_FORK = 5,   /* fork() */
 	HOOK_FLOOD = 6,  /* ask for files without reading the answers, then wait without using CPU */
+	HOOK_OOM = 7,    /* an allocation in value.c fails */
 };
 
 struct zygote {

@@ -8,11 +8,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+void (*v_oom)(void);
+
+static void out_of_memory(void)
+{
+	if (v_oom)
+		v_oom();
+	abort();
+}
+
 static void *xmalloc(size_t n)
 {
 	void *p = malloc(n ? n : 1);
 	if (!p)
-		abort();
+		out_of_memory();
 	return p;
 }
 
@@ -20,7 +29,7 @@ static void *xrealloc(void *p, size_t n)
 {
 	p = realloc(p, n ? n : 1);
 	if (!p)
-		abort();
+		out_of_memory();
 	return p;
 }
 

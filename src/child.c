@@ -29,6 +29,14 @@
 
 #define MAX_DESC_DEPTH 16
 #define MAX_DESC_NODES 4000
+/*
+ * The returned description is copied out of Lua with bounds, so the copy can't outgrow
+ * the run's memory. The normalizer keeps at most 200 bytes of any text and refuses
+ * anything longer than 4200 bytes (an image source), so past MAX_DESC_STR bytes only
+ * whether the rest of a string is valid UTF-8 can change the outcome.
+ */
+#define MAX_DESC_STR 8192
+#define MAX_DESC_TEXT (256 * 1024) /* all strings and field names together */
 #define MAX_DATA_DEPTH 64
 #define MAX_DATA_NODES 200000
 
@@ -71,6 +79,12 @@ static void die(char kind, const char *msg)
 {
 	send_tagged(MSG_ERROR, kind, msg, strlen(msg));
 	_exit(kind == ERR_SCRIPT ? 2 : kind == ERR_TIME ? 4 : 3);
+}
+
+/* value.c's allocation failure: over the memory limit, not abort() (which the filter forbids) */
+static void out_of_memory(void)
+{
+	die(ERR_MEMORY, "over the memory limit");
 }
 
 /* ---- limits ---- */
@@ -463,8 +477,27 @@ static void push_value(lua_State *L, const struct value *v)
 
 struct conv {
 	long nodes;
+	size_t text; /* bytes of strings and field names copied */
 	char err[200];
 };
+
+static struct value *copy_str(const char *s, size_t n, struct conv *c)
+{
+	size_t keep = n;
+	if (n > MAX_DESC_STR)
+		keep = utf8_cut(s, n, MAX_DESC_STR);
+	c->text += keep + 1;
+	if (c->text > MAX_DESC_TEXT) {
+		snprintf(c->err, sizeof c->err, "the description is too large");
+		return NULL;
+	}
+	if (keep == n || utf8_valid(s + keep, n - keep))
+		return v_strn(s, keep);
+	/* the cut-off rest isn't valid UTF-8: one invalid byte keeps it so */
+	struct value *v = v_strn(s, keep + 1);
+	v->u.s.p[keep] = (char)0xff;
+	return v;
+}
 
 /* Raw walk of the returned description: no metamethods, bounded depth and size. */
 static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
@@ -484,7 +517,7 @@ static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
 	case LUA_TSTRING: {
 		size_t n;
 		const char *s = lua_tolstring(L, idx, &n);
-		return v_strn(s, n);
+		return copy_str(s, n, c);
 	}
 	case LUA_TTABLE:
 		break;
@@ -540,6 +573,7 @@ static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
 			v_free(m);
 			return NULL;
 		}
+		c->text += kn + 1;
 		struct value *x = to_value(L, -1, depth + 1, c);
 		lua_pop(L, 1);
 		if (!x) {
@@ -669,6 +703,14 @@ static void build_env(lua_State *L, const struct value *props, const struct valu
 	/* the real globals stay unreachable: the widget's chunk gets env as _ENV */
 }
 
+/* An error outside any protected call, such as running out of memory while building the environment */
+static int panic(lua_State *L)
+{
+	if (wcap.hit)
+		die(ERR_MEMORY, "over the memory limit");
+	die(ERR_SCRIPT, lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "error");
+}
+
 static int msgh(lua_State *L)
 {
 	if (!lua_isstring(L, 1))
@@ -688,6 +730,7 @@ static void test_hook(int hook)
 	case HOOK_BLOCK: { char c; struct iovec iov = { &c, 1 }; struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
 		recvmsg(sock, &mh, 0); break; }
 	case HOOK_FORK: fork(); break;
+	case HOOK_OOM: v_strn("", (size_t)1 << 40); break; /* fails under RLIMIT_AS before it copies */
 	case HOOK_FLOOD: {
 		static const char m[] = "O/nonexistent";
 		struct iovec iov = { (void *)m, sizeof m - 1 };
@@ -706,6 +749,7 @@ static void test_hook(int hook)
 void child_main(int s, const struct run_req *req, size_t len, uint64_t as_limit)
 {
 	sock = s;
+	v_oom = out_of_memory;
 	if (req->magic != REQ_MAGIC ||
 	    len < sizeof *req + (size_t)req->script_len + req->props_len + req->apps_len + req->name_len)
 		_exit(6);
@@ -743,6 +787,7 @@ void child_main(int s, const struct run_req *req, size_t len, uint64_t as_limit)
 	lua_State *L = lua_newstate(capped_alloc, &wcap);
 	if (!L)
 		die(ERR_MEMORY, "over the memory limit");
+	lua_atpanic(L, panic);
 	lua_sethook(L, hook, LUA_MASKCOUNT, 1000);
 	build_env(L, props, apps, req->now);
 	v_free(props);
@@ -775,7 +820,7 @@ void child_main(int s, const struct run_req *req, size_t len, uint64_t as_limit)
 		die(ERR_SCRIPT, e ? e : "error");
 	}
 
-	struct conv c = { 0, "" };
+	struct conv c = { 0, 0, "" };
 	struct value *v = to_value(L, -1, 0, &c);
 	if (!v)
 		die(ERR_SCRIPT, c.err);

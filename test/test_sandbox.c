@@ -356,6 +356,10 @@ static void limits(void)
 	alarm(0);
 	CHECK_INT(o.status, RUN_CRASH);
 	CHECK_STR(o.text, "stopped: it asked for files without reading the answers");
+	/* an allocation that fails outside Lua ends the run as memory, not as a blocked system call */
+	o = run(W("hello"), NULL, HOOK_OOM, false, false, NULL);
+	CHECK_INT(o.status, RUN_MEMORY);
+	CHECK_STR(o.text, "over the memory limit");
 }
 
 /* real failing runs: the last good output stays, the third failure in a row pauses */
@@ -404,6 +408,10 @@ static void outputs(void)
 		{ "error", "widget.lua:8: boom" },
 		{ "errtable", "error (not a string)" },
 		{ "imgfile", "invalid output: ui.image: /etc/hostname is not in the widget's reads" },
+		/* 3000 references to one 1 MB string: copied out of Lua with bounds, not in full */
+		{ "bigstrings", "the description is too large" },
+		/* the copy keeps only the start of a long string, but not valid UTF-8 past it still fails */
+		{ "badtail", "ui.text: the text is not valid UTF-8" },
 	};
 	for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
 		char props[64];
@@ -412,6 +420,14 @@ static void outputs(void)
 		CHECK_INT(o.status, RUN_ERROR);
 		CHECK_STR(o.text, bad[i].msg);
 	}
+
+	/* longer text is cut at a character boundary, as before the copy was bounded */
+	struct out l = run(W("badout"), "{\"case\":\"longtext\"}", 0, false, false, NULL);
+	char want[300] = "[{\"t\":\"text\",\"text\":\"";
+	for (int i = 0; i < 100; i++)
+		strcat(want, "\u00e9");
+	strcat(want, "\"}]");
+	CHECK_STR(l.text, want);
 
 	/* a settings script: rows carry ui.set and the current choice */
 	const char *apps = "{\"categories\":[{\"name\":\"Games\",\"count\":3},{\"name\":\"Office\",\"count\":5}]}";

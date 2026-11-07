@@ -26,6 +26,12 @@ struct value {
 	} u;
 };
 
+/*
+ * Allocation failure calls v_oom, when set, and then abort(). The sandboxed run sets it
+ * to end the run as over the memory limit (abort() needs system calls its filter forbids).
+ */
+extern void (*v_oom)(void);
+
 struct value *v_null(void);
 struct value *v_bool(bool b);
 struct value *v_int(long long i);
