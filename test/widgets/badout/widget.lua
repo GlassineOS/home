@@ -16,6 +16,7 @@ return { render = function(ctx, props)
   if props.case == "badtail" then return { ui.text(string.rep("a", 10000) .. "\255") } end
   if props.case == "longerror" then error("\u{e9}e" .. string.rep("\u{65e5}\u{672c}", 400)) end
   if props.case == "longprint" then print("x" .. string.rep("\u{65e5}\u{672c}", 100)) return {} end
+  if props.case == "biglist" then local t = {} for i = 1, 5000 do t[i] = 1 end return t end
   if props.case == "imgfile" then return { ui.image { src = "file:/etc/hostname", h = 10, alt = "x" } } end
   return {}
 end }

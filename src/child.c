@@ -763,6 +763,10 @@ static struct value *to_value(lua_State *L, int idx, int depth, struct conv *c)
 		if (count > MAX_DESC_NODES)
 			break;
 	}
+	if (count > MAX_DESC_NODES) {
+		snprintf(c->err, sizeof c->err, "the description is too large");
+		return NULL;
+	}
 	if (len > 0 && (lua_Unsigned)count == len) {
 		struct value *a = v_arr();
 		for (lua_Unsigned i = 1; i <= len; i++) {

@@ -474,6 +474,8 @@ static void outputs(void)
 		{ "imgfile", "invalid output: ui.image: /etc/hostname is not in the widget's reads" },
 		/* 3000 references to one 1 MB string: copied out of Lua with bounds, not in full */
 		{ "bigstrings", "the description is too large" },
+		/* more items than the walk counts: too large, not mixed */
+		{ "biglist", "the description is too large" },
 		/* the copy keeps only the start of a long string, but not valid UTF-8 past it still fails */
 		{ "badtail", "ui.text: the text is not valid UTF-8" },
 	};
