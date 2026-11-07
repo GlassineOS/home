@@ -527,6 +527,8 @@ static void paint_script(struct card *c, int ci, struct rect in)
 				ui_hline(&G, cx, y + hh - 1, cw, 1, UI_RULE, 2);
 			}
 		} else if (!strcmp(t, "button")) {
+			if (y + 36 > body.y + body.h + 4) /* the clip's room below */
+				break; /* a button shows whole or not at all (Arrange's smaller cards) */
 			const char *label = str_of(it, "label"), *icon = str_of(it, "icon");
 			double lw = ui_text_w(&G, &v->titleFont, label, NULL);
 			double bw = 12 + (icon ? 26 : 0) + lw + 12;
@@ -542,7 +544,7 @@ static void paint_script(struct card *c, int ci, struct rect in)
 				tx += 26;
 			}
 			ui_text(&G, &v->titleFont, label, tx, y + (36 - text_h(&v->titleFont)) / 2, 0, cx + bw - 12 - tx, fg, NULL);
-			if (!H->edit && y + 36 <= body.y + body.h + 0.5) /* only a button that shows whole */
+			if (!H->edit)
 				hit_add(b, A_WBUTTON, ci, (int)i, NULL, true, btn_r());
 			hh = 36;
 		} else {
