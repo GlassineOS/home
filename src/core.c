@@ -714,6 +714,11 @@ static void toggle_fav(struct home *h, const char *id)
 	save_conf(h);
 }
 
+bool home_helper_gone(const struct home *h)
+{
+	return h->z && h->z->gone;
+}
+
 bool home_is_fav(const struct home *h, const char *id)
 {
 	return is_fav(h, id);

@@ -457,6 +457,7 @@ int home_wayland_main(struct zygote *z)
 	signal(SIGPIPE, SIG_IGN);
 	home_appear(&h);
 
+	int status = 0;
 	while (W.running) {
 		int wait = home_tick(&h);
 		wl_display_flush(W.d);
@@ -482,10 +483,15 @@ int home_wayland_main(struct zygote *z)
 		for (int i = 0; r > 0 && i < nf; i++)
 			if (p[1 + i].revents)
 				home_ready(&h, p[1 + i].fd);
+		if (home_helper_gone(&h)) {
+			fprintf(stderr, "glassine-home: the widget helper stopped; exiting, for the session to start Home again\n");
+			status = 1;
+			break;
+		}
 	}
 	home_free(&h);
 	for (int i = 0; i < FRAME_BUFFERS; i++)
 		wlbuf_free(&W.buf[i]);
 	wl_display_disconnect(W.d);
-	return 0;
+	return status;
 }

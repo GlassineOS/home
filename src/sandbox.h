@@ -51,7 +51,8 @@ struct zygote {
 	/*
 	 * Its socket hung up (killed, out of memory): a run in flight ends as a crash and
 	 * no run starts again. It isn't forked anew: Home has threads by then (sandbox.h's
-	 * rule for zygote_start), so widgets run again when Home restarts.
+	 * rule for zygote_start), so glassine-home exits non-zero and the session starts it
+	 * again (home_helper_gone).
 	 */
 	bool gone;
 };

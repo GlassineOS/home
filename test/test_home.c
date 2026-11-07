@@ -14,9 +14,11 @@
 #include <stdarg.h>
 #include <math.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -747,6 +749,30 @@ static void touch_targets(struct zygote *z)
 
 /* ---- wl.c's frames: a paint while both buffers are busy is owed, and nothing is lost --- */
 
+/* the widget helper is killed while Home is idle: the next run fails at once with the
+ * message, and home_helper_gone tells the loop to exit (wl.c) */
+static void helper_gone(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	struct home h;
+	struct home_io io = { .commit = on_commit };
+	home_init(&h, z, &io);
+	home_resize(&h, 702, 884, 1);
+	home_appear(&h);
+	loop(&h, true, 0, -1, NULL);
+	CHECK_INT(h.cards[C_NOTES].st.last, RUN_OK);
+	CHECK(!home_helper_gone(&h));
+	kill(z->pid, SIGKILL);
+	waitpid(z->pid, NULL, 0);
+	start_run(&h, C_NOTES);
+	loop(&h, true, 0, -1, NULL);
+	CHECK(home_helper_gone(&h));
+	CHECK_INT(h.cards[C_NOTES].st.last, RUN_CRASH);
+	CHECK_STR(h.cards[C_NOTES].fail, "could not start the run: Home's widget helper stopped; widgets run again when Home restarts");
+	home_free(&h);
+}
+
 static void frames_busy(void)
 {
 	struct frames f;
@@ -1166,8 +1192,8 @@ int main(void)
 {
 	setup();
 	/* the zygote first, before any thread (sandbox.h) */
-	struct zygote z;
-	if (!zygote_start(&z)) {
+	struct zygote z, z2; /* z2 for helper_gone, which kills it */
+	if (!zygote_start(&z) || !zygote_start(&z2)) {
 		perror("zygote");
 		return 1;
 	}
@@ -1181,6 +1207,8 @@ int main(void)
 	image_limits();
 	frames_busy();
 	touch_targets(&z);
+	helper_gone(&z2);
+	zygote_stop(&z2);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

@@ -191,6 +191,12 @@ int home_fds(struct home *h, int *fds, int max);
 void home_ready(struct home *h, int fd);
 /* Runs due work and paints when it should; returns ms until it wants to be called again. */
 int home_tick(struct home *h);
+/*
+ * The zygote is gone (killed, out of memory): no widget runs again in this process, and
+ * it can't be forked anew (Home has threads by now). The loop then exits non-zero, and
+ * the session starts Home again with a fresh one.
+ */
+bool home_helper_gone(const struct home *h);
 
 /* Input, in logical px. */
 void home_press(struct home *h, double x, double y);

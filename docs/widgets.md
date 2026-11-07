@@ -179,6 +179,10 @@ socket, Home checks `reads`, opens the file beneath the read's directory without
 is missing), refuses non-regular files, and passes the open file back. Home checks the run's
 output again; the run is untrusted.
 
+If the helper itself stops (an out-of-memory kill, say), Home exits with status 1 and the session
+starts it again with a new helper: the layout is kept in `home.conf`, while the page, Arrange mode
+and an open sheet start afresh. Home can't fork a new helper itself once it has threads.
+
 ## Trying a widget
 
 ```
