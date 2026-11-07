@@ -253,8 +253,9 @@ static struct value *image(struct nctx *c, const struct value *in)
 		}
 	} else if (!strncmp(s, "cover:", 6)) {
 		/*
-		 * Home reads the book to find its cover, so the widget picks a file Home reads; the
-		 * image worker must open it like broker_open does (no links, regular files only)
+		 * Home doesn't open the book: the path only names the freedesktop thumbnail it shows
+		 * (img_cover_path). Should Home ever read the book itself, the image worker must open
+		 * it like broker_open does (no links, regular files only).
 		 */
 		if (!clean_path(s + 6, n - 6)) {
 			nfail(c, "%s", "ui.image: cover: needs an absolute path without '.' or '..' parts, "

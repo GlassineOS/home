@@ -127,7 +127,27 @@ static pid_t spawn(struct zygote *z, const void *req, size_t len, int child_end)
 	}
 }
 
-static void reply_fd(int s, struct broker *b, const char *path)
+/*
+ * Answers to the child never wait: a child reads each answer before it asks again, so
+ * a full socket means it stopped reading, and blocking here would stop Home's loop
+ * too. Returns false when the answer couldn't be queued for that reason.
+ */
+static bool answer(int s, struct msghdr *mh)
+{
+	ssize_t n;
+	while ((n = sendmsg(s, mh, MSG_NOSIGNAL | MSG_DONTWAIT)) < 0 && errno == EINTR)
+		;
+	return n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK);
+}
+
+static bool answer_text(int s, const char *m, size_t n)
+{
+	struct iovec iov = { (void *)m, n };
+	struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+	return answer(s, &mh);
+}
+
+static bool reply_fd(int s, struct broker *b, const char *path)
 {
 	long long size = 0;
 	int fd = broker_open(b, path, &size);
@@ -144,9 +164,9 @@ static void reply_fd(int s, struct broker *b, const char *path)
 		c->cmsg_type = SCM_RIGHTS;
 		c->cmsg_len = CMSG_LEN(sizeof(int));
 		memcpy(CMSG_DATA(c), &fd, sizeof fd);
-		sendmsg(s, &mh, MSG_NOSIGNAL);
+		bool sent = answer(s, &mh);
 		close(fd);
-		return;
+		return sent;
 	}
 	int e = errno;
 	char m[300];
@@ -158,7 +178,7 @@ static void reply_fd(int s, struct broker *b, const char *path)
 			: e == ENOENT ? "no such file"
 			: strerror(e);
 	int n = snprintf(m, sizeof m, "%c%c%s", MSG_NOFD, denied ? 'd' : 'n', why);
-	send(s, m, (size_t)n, MSG_NOSIGNAL);
+	return answer_text(s, m, (size_t)n);
 }
 
 struct run {
@@ -169,7 +189,7 @@ struct run {
 	int sock;
 	long long start, reap_end;
 	int wall;
-	bool killed, got_final, kill_sent;
+	bool killed, stalled, got_final, kill_sent;
 	bool edit;
 	struct broker b;
 	char *msg;
@@ -270,7 +290,9 @@ static void one_message(struct run *run)
 {
 	struct run_result *r = run->r;
 	char *msg = run->msg;
-	ssize_t n = recv(run->sock, msg, DESC_MAX_JSON + 15, MSG_DONTWAIT);
+	struct iovec iov = { msg, DESC_MAX_JSON + 15 };
+	struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+	ssize_t n = recvmsg(run->sock, &mh, MSG_DONTWAIT);
 	if (n < 0 && (errno == EAGAIN || errno == EINTR))
 		return;
 	if (n <= 0) { /* the child is gone */
@@ -281,23 +303,31 @@ static void one_message(struct run *run)
 		return;
 	}
 	msg[n] = 0;
+	/* longer than the buffer: a description cut to it could still parse ("[]" and padding) */
+	bool cut = mh.msg_flags & MSG_TRUNC;
 	if (msg[0] == MSG_OPEN) {
-		if (memchr(msg + 1, 0, (size_t)n - 1))
-			send(run->sock, "Nd" "not a valid path", 18, MSG_NOSIGNAL);
-		else
-			reply_fd(run->sock, &run->b, msg + 1);
+		bool sent = memchr(msg + 1, 0, (size_t)n - 1) ? answer_text(run->sock, "Nd" "not a valid path", 18)
+							     : reply_fd(run->sock, &run->b, msg + 1);
+		if (!sent) { /* it stopped reading the answers: end it, as the wall clock would */
+			kill(run->pid, SIGKILL);
+			run->stalled = true;
+			close(run->sock);
+			run->sock = -1;
+			run->state = ST_REAPING;
+			run->reap_end = now_ms() + 2000;
+		}
 	} else if (msg[0] == MSG_PRINT) {
 		if (r->nlog < RUN_MAX_LOG && utf8_valid(msg + 1, (size_t)n - 1))
 			r->log[r->nlog++] = strdup(msg + 1);
 	} else if (msg[0] == MSG_DONE && !run->got_final) {
 		run->got_final = true;
-		char err[256];
-		struct value *v = v_from_json(msg + 1, (size_t)n - 1, 32, err, sizeof err);
+		char err[256] = "the description is too large";
+		struct value *v = cut ? NULL : v_from_json(msg + 1, (size_t)n - 1, 32, err, sizeof err);
 		struct value *d = v ? desc_normalize(v, run->edit, broker_path_check, &run->b, err, sizeof err) : NULL;
 		v_free(v);
 		if (!d) {
 			r->status = RUN_ERROR;
-			snprintf(r->msg, sizeof r->msg, "invalid output: %s", err);
+			set_msg(r->msg, sizeof r->msg, "invalid output: %s", err);
 		} else {
 			r->status = RUN_OK;
 			r->desc = d;
@@ -310,7 +340,7 @@ static void one_message(struct run *run)
 		size_t l = (size_t)n - 2;
 		if (!utf8_valid(msg + 2, l))
 			l = 0;
-		snprintf(r->msg, sizeof r->msg, "%.*s", (int)l, msg + 2);
+		set_msg(r->msg, sizeof r->msg, "%.*s", (int)l, msg + 2);
 	}
 }
 
@@ -324,6 +354,10 @@ static void finish(struct run *run)
 		run_result_free(r);
 		r->status = RUN_TIMEOUT;
 		snprintf(r->msg, sizeof r->msg, "stopped after %d ms", run->wall);
+	} else if (run->stalled) {
+		run_result_free(r);
+		r->status = RUN_CRASH;
+		snprintf(r->msg, sizeof r->msg, "stopped: it asked for files without reading the answers");
 	} else if (WIFSIGNALED(status)) {
 		int sig = WTERMSIG(status);
 		v_free(r->desc);
