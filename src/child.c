@@ -66,8 +66,7 @@ static void send_tagged(char tag, char sub, const char *s, size_t n)
 {
 	char m[1024];
 	size_t h = sub ? 2 : 1;
-	if (n > sizeof m - h)
-		n = sizeof m - h;
+	n = utf8_cut(s, n, sizeof m - h); /* Home drops a message that isn't valid UTF-8 */
 	m[0] = tag;
 	if (sub)
 		m[1] = sub;
@@ -465,7 +464,7 @@ static int l_print(lua_State *L)
 	lua_concat(L, n ? 2 * n - 1 : 0);
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
-	send_tagged(MSG_PRINT, 0, s, len > 300 ? 300 : len);
+	send_tagged(MSG_PRINT, 0, s, utf8_cut(s, len, 300));
 	return 0;
 }
 

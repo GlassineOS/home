@@ -103,6 +103,8 @@ struct out {
 	uint64_t hash;
 	size_t nfiles;
 	char files[4][256];
+	size_t nlog;
+	char log0[400]; /* the first print line */
 };
 
 static struct out run(const char *dir, const char *props_json, int hook, bool fallback, bool edit, const char *apps)
@@ -129,6 +131,9 @@ static struct out run(const char *dir, const char *props_json, int hook, bool fa
 	o.nfiles = r.nfiles;
 	for (size_t i = 0; i < r.nfiles && i < 4; i++)
 		snprintf(o.files[i], sizeof o.files[i], "%s", r.files[i] + strlen(home));
+	o.nlog = r.nlog;
+	if (r.nlog)
+		snprintf(o.log0, sizeof o.log0, "%s", r.log[0]);
 	run_result_free(&r);
 	v_free(props);
 	v_free(saved);
@@ -464,6 +469,18 @@ static void outputs(void)
 		CHECK_INT(o.status, RUN_ERROR);
 		CHECK_STR(o.text, bad[i].msg);
 	}
+
+	/*
+	 * a long error message and a long print line are cut at a character boundary, on
+	 * both sides, not dropped as invalid UTF-8
+	 */
+	struct out le = run(W("badout"), "{\"case\":\"longerror\"}", 0, false, false, NULL);
+	CHECK_INT(le.status, RUN_ERROR);
+	CHECK(!strncmp(le.text, "widget.lua:", 11) && strlen(le.text) > 500 && utf8_valid(le.text, strlen(le.text)));
+	struct out lp = run(W("badout"), "{\"case\":\"longprint\"}", 0, false, false, NULL);
+	CHECK_INT(lp.nlog, 1);
+	CHECK_INT(strlen(lp.log0), 298); /* "x" and 99 characters of 3 bytes: the 100th would pass 300 */
+	CHECK(utf8_valid(lp.log0, strlen(lp.log0)));
 
 	/* longer text is cut at a character boundary, as before the copy was bounded */
 	struct out l = run(W("badout"), "{\"case\":\"longtext\"}", 0, false, false, NULL);

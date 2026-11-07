@@ -13,9 +13,17 @@ struct nctx {
 	size_t errlen;
 };
 
+/* The message is cut at a character boundary: cut inside one, it isn't valid UTF-8 and Home drops it. */
 static bool nfail(struct nctx *c, const char *fmt, const char *a)
 {
-	snprintf(c->err, c->errlen, fmt, a);
+	char tmp[8192];
+	int n = snprintf(tmp, sizeof tmp, fmt, a);
+	size_t len = n < 0 ? 0 : (size_t)n < sizeof tmp ? (size_t)n : sizeof tmp - 1;
+	if (c->errlen) {
+		len = utf8_cut(tmp, len, c->errlen - 1);
+		memcpy(c->err, tmp, len);
+		c->err[len] = 0;
+	}
 	return false;
 }
 

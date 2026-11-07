@@ -90,6 +90,17 @@ int main(void)
 	CHECK(!n);
 	CHECK_STR(err, "ui.image: /etc/x.png is not in the widget's reads");
 	v_free(in);
+	/* a message with a long path is cut at a character boundary, so it stays valid UTF-8 */
+	char lj[1024] = "[{\"t\":\"image\",\"src\":\"file:/xy/";
+	for (int i = 0; i < 300; i++)
+		strcat(lj, "\xc3\xa9");
+	strcat(lj, "\",\"h\":10,\"alt\":\"x\"}]");
+	in = v_from_json(lj, strlen(lj), 8, err, sizeof err);
+	CHECK(in);
+	n = desc_normalize(in, false, only_home, NULL, err, sizeof err);
+	CHECK(!n);
+	CHECK(!strncmp(err, "ui.image: /xy/", 14) && strlen(err) >= 250 && utf8_valid(err, strlen(err)));
+	v_free(in);
 
 	/* strings: cut at a code point boundary; invalid UTF-8 refused */
 	char longt[400] = "[{\"t\":\"title\",\"text\":\"";
