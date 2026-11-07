@@ -143,6 +143,14 @@ later with one partial refresh of that rectangle only; nothing else moves.
 - **FR-041**: Touch targets ≥ 48 px; Tab/Enter/Space/Escape as in `GlassineOS/shell` spec 001 FR-050; no animation; nothing redraws
   more than once a second; three voices; portrait and landscape.
 - **FR-042**: A built-in Continue reading widget for KOReader ships with Home (Scenario 6).
+- **FR-043**: The layout file (`~/.config/glassine/home.conf`, FR-040) is Home's, and Settings may edit one key
+  of it, `favourites`, keeping every other line as it is. Every writer writes a temporary file in the same
+  folder, syncs it and renames it over the file, holding an exclusive `flock` on
+  `~/.config/glassine/home.conf.lock` while it does; Home takes the same lock when it writes and waits for it.
+  A file with a newer `version` than the writer knows is not written. Home watches the file and reloads on an
+  outside change, keeping the page and Arrange: a removed widget disappears, a changed favourites list redraws
+  only the Favourite apps card. A file from outside that Home can't read leaves Home as it was and is not
+  overwritten; Home logs it.
 
 ## Contracts
 
@@ -154,6 +162,7 @@ later with one partial refresh of that rectangle only; nothing else moves.
 | KOReader history and book metadata (read only) | consumed | KOReader's current format | KOReader |
 | The E-ink dithering setting | consumed | as Settings writes it | spec of Settings › E-ink |
 | Places (the user's books folder; a user-level setting Settings can later own) | owned | 1 | this repository, `docs/widgets.md` |
+| The layout file `home.conf` (keys, the `[[widget]]` tables, `version`; Settings edits only `favourites`, under the lock of FR-043) | owned | 1 | this repository, `docs/home-conf.md` |
 
 ## Device scope and risk
 
@@ -167,6 +176,12 @@ Device-neutral (grid and sizes follow the screen's logical size). No device risk
 - Host: places: the default, a set folder, an unset or missing one, an unknown name, a place that is a link or
   points into system areas (refused); Continue reading with a library outside `~/Books`.
 - Host: renders of every `home.*` board state in three voices and both orientations.
+- Host: Arrange by taps and keys: swap (only where offered), page swap, size, remove (All apps included), Add
+  widget (built in, from an app, the user's own), widget settings; the layout file after each, one commit per
+  action, damage only where the screen changed.
+- Host: the layout file shared: an outside change of favourites (with the lock held and without) reloads and
+  redraws only the Favourite apps card; Home's write waits for the lock; a broken file from outside is neither
+  loaded nor overwritten.
 - Hardware (supervised): Home from the bar, open an app, Arrange, add a widget, Continue reading with a real book.
 
 ## Out of scope
