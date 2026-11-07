@@ -2001,6 +2001,31 @@ static bool file_has(const char *what)
 	return strstr(lay, what) != NULL;
 }
 
+/* home.conf removed from outside: Home keeps its layout, writes the file again at its next change */
+static void conf_removed(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	struct home h;
+	start(&h, z);
+	char p[2048], d[512];
+	conf_path(p, sizeof p);
+	unlink(p);
+	loop(&h, true, 1000, -1, NULL);
+	CHECK(access(p, F_OK) != 0); /* not written back on its own */
+	CHECK_INT(h.ncards, 9);
+	CHECK_INT(h.reloads, 0);
+	CHECK_INT(h.conf_refused, 0);
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	remove_card(&h, C_SKY, d, sizeof d);
+	CHECK_INT(h.ncards, 8);
+	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h all-apps:3 "
+		     "app-category:2 photo-frame:w", "1 2 3 4 5 7 8 9");
+	CHECK(h.conf.nfav == 8 && home_is_fav(&h, "koreader"));
+	CHECK(strstr(slurp(p), "favourites = [\"koreader\"") != NULL);
+	home_free(&h);
+}
+
 /* a file Home can't read when it starts is left alone: no .broken, nothing written over it */
 static void bad_start(struct zygote *z)
 {
@@ -2157,6 +2182,7 @@ int main(void)
 	arrange(&z);
 	shared(&z);
 	first_start(&z);
+	conf_removed(&z);
 	bad_start(&z);
 	conf_conflicts(&z);
 	zygote_stop(&z);
