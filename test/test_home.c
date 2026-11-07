@@ -2158,6 +2158,48 @@ static void conf_conflicts(struct zygote *z)
 	CHECK(!file_has("calendar-next:h"));
 }
 
+/* the config folder itself removed, and made again by Home's next write */
+static void conf_dir_gone(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	char dir[2048], p[2048], d[512], text[8192];
+	snprintf(dir, sizeof dir, "%s/conf-dir", T);
+	snprintf(p, sizeof p, "%s/home.conf", dir);
+	sh("rm -rf '%s' && mkdir -p '%s'", dir, dir);
+	setenv("GLASSINE_HOME_CONF", p, 1);
+	reset();
+	put(p, CONF);
+	struct home h;
+	start(&h, z);
+	CHECK(h.wd_conf >= 0);
+	sh("rm -rf '%s'", dir);
+	loop(&h, true, 300, -1, NULL);
+	CHECK(h.wd_conf < 0); /* its watch ended with the folder */
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	remove_card(&h, C_SKY, d, sizeof d);
+	CHECK(access(p, F_OK) == 0); /* the folder and file are made again */
+	CHECK(h.wd_conf >= 0);
+	/* and Settings' write there is seen again */
+	snprintf(text, sizeof text, "%s", slurp(p));
+	char *a = strstr(text, "favourites = [");
+	CHECK(a != NULL);
+	if (a) {
+		char out[8192];
+		char *b = strchr(a, ']');
+		snprintf(out, sizeof out, "%.*sfavourites = [\"foot\"]%s", (int)(a - text), text, b + 1);
+		char tmp[2200];
+		snprintf(tmp, sizeof tmp, "%s/.home.conf.settings", dir);
+		put(tmp, out);
+		CHECK(rename(tmp, p) == 0);
+		loop(&h, true, 1500, -1, NULL);
+		CHECK(home_is_fav(&h, "foot") && !home_is_fav(&h, "koreader"));
+	}
+	home_free(&h);
+	snprintf(text, sizeof text, "%s/home.conf", T);
+	setenv("GLASSINE_HOME_CONF", text, 1);
+}
+
+
 int main(void)
 {
 	setup();
@@ -2185,6 +2227,7 @@ int main(void)
 	conf_removed(&z);
 	bad_start(&z);
 	conf_conflicts(&z);
+	conf_dir_gone(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

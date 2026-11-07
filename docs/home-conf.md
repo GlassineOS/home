@@ -54,7 +54,7 @@ keeping the file's favourites.
 |---|---|---|
 | `uuid` | string | The instance's id: a version 4 UUID, 36 characters, lowercase hex. Unique in the file; it stays the same when the widget moves, changes size or settings. |
 | `widget` | string | `SOURCE/ID`. SOURCE is `builtin` (ships with Home), `system` (brought by an app), `user` (the user's own) or `home` (Home's app widgets: `home/favourites`, `home/all-apps`, `home/app-category`). ID is a widget id, `[a-z0-9][a-z0-9._-]*`, at most 64 bytes (`docs/widgets.md`). |
-| `size` | string or integer | `"half"` or `"wide"` for a widget with a script; `1`, `2`, `3` or `5` (rows) for an app widget. |
+| `size` | string or integer | `"half"` or `"wide"`, or `1`, `2`, `3` or `5` (rows). Home writes `"half"`/`"wide"` for a widget with a script and rows for an app widget; the reader accepts any of the four kinds for any widget (it doesn't check them against the widget). |
 | `props` | inline table | Optional. The settings the user changed: strings, integers, floats, booleans; nothing nested. A key the widget doesn't declare, or of another type than its default, is kept in the file but not used. |
 
 A widget whose folder is gone keeps its place and its table; Home shows it as "Missing widget".
@@ -115,6 +115,9 @@ nothing new.
   (an editor that renames the old file away before writing the new one is logged once as removed,
   then reloaded).
 - Home itself waits up to 100 ms for the lock (it is waiting on the screen's loop); then it keeps the
-  change and tries again, without waiting, until the lock is free. A writer that holds the lock longer only delays Home's write. A write that fails (a full disk, a read-only folder) is kept the same
+  change and tries again, without waiting, until the lock is free. A writer that holds the lock longer
+  only delays Home's write. A write that fails (a full disk, a read-only folder) is kept the same
   way and tried again every second, logged once. When Home exits it tries once more, without waiting;
   a change still waiting then (the lock held, or the write failing again) is lost.
+- If the folder itself is removed, Home's watch on it ends; it makes the folder and watches it again at
+  its next write.

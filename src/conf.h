@@ -53,7 +53,11 @@ bool conf_default_path(char *out, size_t len);
  * is not written over (FR-043); err says why.
  */
 bool conf_load(const char *path, struct home_conf *c, char *err, size_t errlen);
-/* Writes the file under the lock (waiting for it). */
+/*
+ * Writes the caller's layout under the lock (waiting for it as long as it takes), without
+ * reading what is on disk first. Test-only: Home writes through core.c's save_conf, which
+ * merges with Settings' changes. A new writer must re-read under the lock too.
+ */
 bool conf_save(const char *path, const struct home_conf *c, char *err, size_t errlen);
 void conf_free(struct home_conf *c);
 

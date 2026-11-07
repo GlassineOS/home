@@ -1421,6 +1421,11 @@ int home_fds(struct home *h, int *fds, int max)
 static void inotify_event(struct home *h, int wd, uint32_t mask, const char *name)
 {
 	long long now = mono_ms();
+	if (wd == h->wd_conf && wd >= 0 && (mask & IN_IGNORED)) {
+		/* the config folder was removed: its watch is gone; the next write makes the folder and watches it again */
+		h->wd_conf = -1;
+		return;
+	}
 	if (wd == h->wd_conf && wd >= 0 && name) {
 		const char *base = strrchr(h->conf_path, '/');
 		if (!strcmp(name, base ? base + 1 : h->conf_path)) {
