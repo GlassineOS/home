@@ -3,8 +3,8 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 
 This is the widget format that `glassine-home` owns (spec 001, Contracts). Apps ship widgets against
-it; a breaking change raises the format number. Status: implemented with host tests; not yet run on a
-device, and Home does not draw widgets yet (the drawing comes with `GlassineOS/ui`).
+it; a breaking change raises the format number. Status: implemented with host tests, and drawn by `glassine-home`;
+not yet run on a device.
 
 A widget only describes what to show. Home draws it in the current voice and decides when it runs,
 so a widget can't animate, flash the panel or keep the CPU awake.
@@ -122,10 +122,13 @@ script set.
 Text must be valid UTF-8; control characters become spaces; longer text is cut at a character
 boundary.
 
-Actions: `ui.open(app, file)` (an app id, an optional absolute file path) and `ui.settings(page)`.
+Actions: `ui.open(app, file)` (an app id, an optional absolute file path; an id that isn't a
+desktop id matches the last part of one, case-insensitively, so `koreader` also finds
+`rocks.koreader.KOReader`, and the one opened last wins) and `ui.settings(page)`.
 Nothing else can run.
 
-Image slots: `src` is `file:PATH` (inside `reads`), `cover:PATH` (an ebook's cover) or `icon:APP`;
+Image slots: `src` is `file:PATH` (inside `reads`), `cover:PATH` (an ebook's cover: the book's freedesktop thumbnail, as a file manager or
+KOReader makes it; Home doesn't open the book) or `icon:APP`;
 no network sources. `h` (and `w` when `side` is set) are whole pixels from 1 to 2000; Home clamps
 them to the card. `side` is `"left"`, `"right"` or absent/`"none"` (full width); `fit` is `"cover"`
 (default) or `"contain"`; `alt` is required (shown in the dashed frame until the image is ready).
