@@ -535,17 +535,15 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 		snprintf(h->conf_path, sizeof h->conf_path, "%s", cp);
 	else if (!conf_default_path(h->conf_path, sizeof h->conf_path))
 		snprintf(h->conf_path, sizeof h->conf_path, "/tmp/glassine-home.conf");
-	struct stat st;
-	bool fresh = stat(h->conf_path, &st) != 0 && errno == ENOENT;
-	bool loaded = conf_load(h->conf_path, &h->conf, err, sizeof err);
-	if (!loaded)
-		fprintf(stderr, "glassine-home: %s\n", err);
-	if (!fresh) {
-		/* what an outside change is compared with */
-		enum conf_state cs;
-		struct home_conf d;
-		h->disk_text = conf_read(h->conf_path, &h->disk_len, &cs, &d, err, sizeof err);
-		conf_free(&d);
+	/* one read of the file: what Home loads and what an outside change is compared with */
+	enum conf_state cs;
+	h->disk_text = conf_read(h->conf_path, &h->disk_len, &cs, &h->conf, err, sizeof err);
+	bool fresh = cs == CONF_MISSING, loaded = cs == CONF_OK || fresh;
+	if (!loaded) {
+		/* broken, newer or unreadable: Home starts empty and leaves the file alone (FR-043); its
+		 * changes are written when a readable file appears (conf_changed) */
+		h->conf.read_only = true;
+		fprintf(stderr, "glassine-home: %s; leaving it as it is\n", err[0] ? err : h->conf_path);
 	}
 	if (fresh || (loaded && !h->conf.has_widgets))
 		first_layout(h);

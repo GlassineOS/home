@@ -180,8 +180,8 @@ Device-neutral (grid and sizes follow the screen's logical size). No device risk
   widget (built in, from an app, the user's own), widget settings; the layout file after each, one commit per
   action, damage only where the screen changed.
 - Host: the layout file shared: an outside change of favourites (with the lock held and without) reloads and
-  redraws only the Favourite apps card; Home's write waits for the lock; a broken file from outside is neither
-  loaded nor overwritten.
+  redraws only the Favourite apps card; Home's write waits for the lock; a broken or newer file, at start or from outside,
+  is neither loaded nor overwritten (and never renamed).
 - Hardware (supervised): Home from the bar, open an app, Arrange, add a widget, Continue reading with a real book.
 
 ## Out of scope

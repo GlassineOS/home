@@ -236,18 +236,8 @@ bool conf_load(const char *path, struct home_conf *c, char *err, size_t errlen)
 	free(conf_read(path, &len, &st, c, err, errlen));
 	if (st == CONF_OK || st == CONF_MISSING)
 		return true;
-	if (st != CONF_BROKEN) {
-		/* a newer version, or an I/O problem, not a broken file: leave it where it is */
-		c->read_only = true;
-		return false;
-	}
-	/* keep the unreadable file for the user, start empty */
-	char aside[4200];
-	snprintf(aside, sizeof aside, "%s.broken", path);
-	if (rename(path, aside) == 0) {
-		size_t l = strlen(err);
-		snprintf(err + l, errlen - l, "%s(kept as %s)", l ? " " : "", aside);
-	}
+	/* broken, newer or unreadable: the file stays where it is, untouched and not to be overwritten */
+	c->read_only = true;
 	return false;
 }
 

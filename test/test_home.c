@@ -1975,6 +1975,76 @@ static void first_start(struct zygote *z)
 	home_free(&h);
 }
 
+/* ---- the layout file: gone, not readable, not writable ---------------------------- */
+
+static void start(struct home *h, struct zygote *z)
+{
+	struct home_io io = { .commit = on_commit };
+	home_init(h, z, &io);
+	ui_draw_init();
+	home_resize(h, 702, 884, 1);
+	home_appear(h);
+	settle(h);
+}
+
+static bool file_has(const char *what)
+{
+	char lay[2048];
+	file_layout(lay, sizeof lay, NULL, NULL);
+	return strstr(lay, what) != NULL;
+}
+
+/* a file Home can't read when it starts is left alone: no .broken, nothing written over it */
+static void bad_start(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	char p[2048], aside[2100], d[512], err[256];
+	conf_path(p, sizeof p);
+	snprintf(aside, sizeof aside, "%s.broken", p);
+	static const char *const bad[] = { "version = 1\nfavourites = 3\n", "version = 2\nsomething = \"new\"\n" };
+	for (int k = 0; k < 2; k++) {
+		reset();
+		put(p, bad[k]);
+		unlink(aside);
+		struct home h;
+		start(&h, z);
+		CHECK_INT(h.ncards, 0);
+		CHECK(h.conf.read_only);
+		CHECK(access(aside, F_OK) != 0);
+		CHECK_STR(slurp(p), bad[k]);
+		/* a change in the meantime isn't written over it */
+		CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+		add_from_gallery(&h, 1, d, sizeof d);
+		CHECK_INT(h.ncards, 1);
+		CHECK_STR(slurp(p), bad[k]);
+		/* mended: Home takes the favourites, and writes the widget it kept */
+		outside_write("version = 1\nfavourites = [\"foot\"]\n", true, NULL);
+		loop(&h, true, 1500, -1, NULL);
+		CHECK_INT(h.reloads, 1);
+		CHECK(!h.conf.read_only);
+		CHECK(home_is_fav(&h, "foot"));
+		CHECK_INT(h.ncards, 1);
+		CHECK(file_has("all-apps:3"));
+		CHECK(access(aside, F_OK) != 0);
+		struct home_conf c;
+		CHECK(conf_load(p, &c, err, sizeof err));
+		CHECK(c.nfav == 1 && !strcmp(c.favourites[0], "foot") && c.n == 1);
+		conf_free(&c);
+		home_free(&h);
+	}
+	/* the same on a file that is mended before anything changes: Home just takes it */
+	reset();
+	put(p, bad[0]);
+	struct home h;
+	start(&h, z);
+	outside_write(CONF, true, NULL);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK(!h.conf.read_only);
+	CHECK_INT(h.ncards, 9);
+	CHECK_STR(slurp(p), CONF);
+	home_free(&h);
+}
+
 int main(void)
 {
 	setup();
@@ -1999,6 +2069,7 @@ int main(void)
 	arrange(&z);
 	shared(&z);
 	first_start(&z);
+	bad_start(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

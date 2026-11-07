@@ -48,9 +48,9 @@ struct home_conf {
 bool conf_default_path(char *out, size_t len);
 
 /*
- * Loads the file. A missing file is an empty layout. A file that can't be read is
- * renamed to home.conf.broken (kept, never deleted) and Home starts empty; err says so.
- * A newer version loads nothing and marks the layout read-only.
+ * Loads the file. A missing file is an empty layout. A file that can't be read, or a newer
+ * version, loads nothing and marks the layout read-only: the file is left where it is and
+ * is not written over (FR-043); err says why.
  */
 bool conf_load(const char *path, struct home_conf *c, char *err, size_t errlen);
 /* Writes the file under the lock (waiting for it). */

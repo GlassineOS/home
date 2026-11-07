@@ -99,15 +99,20 @@ int main(void)
 	CHECK_INT(conf_find(&c, c.w[1].uuid), 1);
 	conf_free(&c);
 
-	/* a broken file is kept aside, Home starts empty */
-	write_file("version = 1\n[[widget]]\nuuid = \"nope\"\n");
+	/* a broken file is left where it is (FR-043): nothing loads, nothing is renamed or overwritten */
+	const char *bad = "version = 1\n[[widget]]\nuuid = \"nope\"\n";
+	write_file(bad);
 	CHECK(!conf_load(path, &c, err, sizeof err));
-	CHECK(strstr(err, "kept as") != NULL);
+	CHECK(err[0] != 0);
 	CHECK_INT(c.n, 0);
+	CHECK(c.read_only);
 	char broken[1100];
 	snprintf(broken, sizeof broken, "%s.broken", path);
-	CHECK(access(broken, F_OK) == 0);
-	CHECK(access(path, F_OK) != 0);
+	CHECK(access(broken, F_OK) != 0);
+	CHECK_STR(read_file(path), bad);
+	CHECK(!conf_save(path, &c, err, sizeof err));
+	CHECK_STR(read_file(path), bad);
+	conf_free(&c);
 
 	/* a newer version is left alone and never overwritten */
 	write_file("version = 2\nwhatever = true\n");

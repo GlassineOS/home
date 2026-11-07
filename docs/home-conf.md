@@ -72,9 +72,10 @@ sees no favourites at all. Write it at the top.
 
 ## Reading it
 
-A missing file: Home lays out a new Home and writes it. A file Home can't parse when it starts is renamed to
-`home.conf.broken` (kept, never deleted) and Home starts empty. A `version` higher than the reader
-knows: the reader uses nothing from it and never writes it.
+A missing file: Home lays out a new Home and writes it. A file Home can't parse when it starts, or
+with a `version` higher than the reader knows, is left exactly where it is: Home starts empty, logs it
+and writes nothing over it until a readable file appears (the same as for a file that breaks while
+Home runs, below). A reader uses nothing from a newer file and never writes it.
 
 ## Writing it: the rules every writer follows
 
