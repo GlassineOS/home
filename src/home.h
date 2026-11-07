@@ -40,6 +40,7 @@
 #define MAX_HITS 512
 #define MAX_REGIONS 128
 #define MAX_DAMAGE 64
+#define TOUCH_MIN 48 /* FR-041: a press counts this far around a smaller control (hit_at) */
 #define IMAGE_MAX_BYTES (20 * 1024 * 1024)
 /* sources over this many pixels aren't decoded (dashed frame): memory follows the pixels, not the bytes */
 #define IMAGE_MAX_SOURCE_PX (40LL * 1000 * 1000)

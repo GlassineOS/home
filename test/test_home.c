@@ -652,6 +652,97 @@ static void in_flight(struct zygote *z)
 	setenv("GLASSINE_HOME_USER_WIDGETS", was, 1);
 }
 
+/* ---- touch targets: a press counts within 48 px around a smaller control (FR-041) ---- */
+
+static void press_at(struct home *h, double x, double y)
+{
+	home_press(h, x, y);
+	home_release(h, x, y);
+	home_tick(h);
+}
+
+static struct rect hit_rect(const struct home *h, enum act act, int a)
+{
+	int i = find_hit(h, act, a, NULL);
+	CHECK(i >= 0);
+	return i >= 0 ? h->hits[i].r : (struct rect){ -100, -100, 0, 0 };
+}
+
+static void touch_targets(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	struct home h;
+	struct home_io io = { .commit = on_commit };
+	home_init(&h, z, &io);
+	home_resize(&h, 702, 884, 1);
+	home_appear(&h);
+	loop(&h, true, 0, -1, NULL);
+	home_paint(&h, true);
+
+	/* the header's next page: 44 px drawn, pressed 1 px below it */
+	struct rect r = hit_rect(&h, A_PAGE_NEXT, -1);
+	CHECK(r.h < TOUCH_MIN);
+	int page = h.page;
+	press_at(&h, r.x + r.w / 2, r.y + r.h + 1);
+	CHECK_INT(h.page, page + 1);
+	h.page = 0;
+	h.dirty_now = true;
+	home_tick(&h);
+
+	/* Arrange's card controls: 40 px, 6 px apart. A press in the gap goes to the
+	 * nearer one; one just above the remove button removes */
+	CHECK(tap(&h, A_ARRANGE, -1, NULL));
+	struct rect rm = hit_rect(&h, A_CTL_REMOVE, C_FAVS), sz = hit_rect(&h, A_CTL_SIZE, C_FAVS);
+	CHECK(rm.w < TOUCH_MIN && rm.x - (sz.x + sz.w) == 6);
+	int size = h.conf.w[C_FAVS].size;
+	size_t n = h.ncards;
+	press_at(&h, sz.x + sz.w + 2, sz.y + sz.h / 2); /* 2 px from size, 4 from remove */
+	CHECK(h.conf.w[C_FAVS].size != size);
+	CHECK_INT(h.ncards, n);
+	rm = hit_rect(&h, A_CTL_REMOVE, C_CAL);
+	press_at(&h, rm.x + rm.w / 2, rm.y - 3);
+	CHECK_INT(h.ncards, n - 1);
+
+	/* an open sheet's backdrop is a barrier: a press at a control under it (drawn box or
+	 * its touch area) closes the sheet and does nothing else */
+	for (int p = 0; p < 6 && find_hit(&h, A_ADD_CARD, -1, NULL) < 0; p++) {
+		h.page = p;
+		h.dirty_now = true;
+		home_paint(&h, true);
+	}
+	CHECK(tap(&h, A_ADD_CARD, -1, NULL));
+	CHECK(h.sheet == SHEET_GALLERY);
+	n = h.ncards;
+	int barrier = -1;
+	for (int i = 0; i < h.nhits; i++)
+		if (h.hits[i].act == A_SHEET_OUTSIDE)
+			barrier = i;
+	CHECK(barrier >= 0);
+	/* a control under the sheet, and a point in its touch area clear of the sheet's own */
+	double px = -1, py = -1;
+	for (int i = 0; i < barrier && px < 0; i++) {
+		struct rect u = h.hits[i].r;
+		if (u.w >= TOUCH_MIN)
+			continue;
+		double x = u.x - (TOUCH_MIN - u.w) / 2 + 1, y = u.y + u.h / 2;
+		bool clear = true;
+		for (int k = barrier + 1; k < h.nhits && clear; k++) {
+			struct rect t = h.hits[k].r;
+			double gw = t.w < TOUCH_MIN ? (TOUCH_MIN - t.w) / 2 : 0, gh = t.h < TOUCH_MIN ? (TOUCH_MIN - t.h) / 2 : 0;
+			clear = !(x >= t.x - gw && x < t.x + t.w + gw && y >= t.y - gh && y < t.y + t.h + gh);
+		}
+		if (clear)
+			px = x, py = y;
+	}
+	CHECK(px >= 0);
+	press_at(&h, px, py);
+	CHECK(h.sheet == SHEET_NONE);
+	CHECK_INT(h.ncards, n);
+
+	home_free(&h);
+}
+
 /* ---- wl.c's frames: a paint while both buffers are busy is owed, and nothing is lost --- */
 
 static void frames_busy(void)
@@ -795,6 +886,7 @@ int main(void)
 	in_flight(&z);
 	image_limits();
 	frames_busy();
+	touch_targets(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");

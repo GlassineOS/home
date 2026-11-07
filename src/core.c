@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -916,14 +917,50 @@ static void activate(struct home *h, const struct hit *t)
 
 /* ---- input ---------------------------------------------------------------------- */
 
+static bool in_rect(const struct rect *r, double x, double y)
+{
+	return x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h;
+}
+
+/* how far (x, y) is from r, 0 inside */
+static double rect_dist(const struct rect *r, double x, double y)
+{
+	double dx = x < r->x ? r->x - x : x >= r->x + r->w ? x - (r->x + r->w) : 0;
+	double dy = y < r->y ? r->y - y : y >= r->y + r->h ? y - (r->y + r->h) : 0;
+	return hypot(dx, dy);
+}
+
+/*
+ * The hit a press at (x, y) is for. Above an open sheet's backdrop only (it is the
+ * barrier: what lies under the sheet can't be pressed): a drawn box that holds the point,
+ * the topmost first; else the nearest one whose touch area holds it, a box grown to
+ * TOUCH_MIN around its centre (FR-041), so a gap between two controls goes to the closer;
+ * else the backdrop. The drawn box (and the focus ring around it) stays as it is.
+ */
 static int hit_at(const struct home *h, double x, double y)
 {
-	for (int i = h->nhits - 1; i >= 0; i--) {
-		const struct rect *r = &h->hits[i].r;
-		if (x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h)
+	int barrier = -1;
+	for (int i = h->nhits - 1; i >= 0 && barrier < 0; i--)
+		if (h->hits[i].act == A_SHEET_OUTSIDE)
+			barrier = i;
+	for (int i = h->nhits - 1; i > barrier; i--)
+		if (in_rect(&h->hits[i].r, x, y))
 			return i;
+	int best = -1;
+	double best_d = 0;
+	for (int i = h->nhits - 1; i > barrier; i--) {
+		const struct rect *r = &h->hits[i].r;
+		double gw = r->w < TOUCH_MIN ? (TOUCH_MIN - r->w) / 2 : 0, gh = r->h < TOUCH_MIN ? (TOUCH_MIN - r->h) / 2 : 0;
+		struct rect t = { r->x - gw, r->y - gh, r->w + 2 * gw, r->h + 2 * gh };
+		double d = rect_dist(r, x, y);
+		if (in_rect(&t, x, y) && (best < 0 || d < best_d)) {
+			best = i;
+			best_d = d;
+		}
 	}
-	return -1;
+	if (best >= 0)
+		return best;
+	return barrier >= 0 && in_rect(&h->hits[barrier].r, x, y) ? barrier : -1;
 }
 
 void home_press(struct home *h, double x, double y)
