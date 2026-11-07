@@ -44,6 +44,13 @@
 #define IMAGE_MAX_BYTES (20 * 1024 * 1024)
 /* sources over this many pixels aren't decoded (dashed frame): memory follows the pixels, not the bytes */
 #define IMAGE_MAX_SOURCE_PX (40LL * 1000 * 1000)
+/*
+ * An action that saves waits this long for home.conf.lock on the UI loop, then keeps the
+ * change and home_tick retries without waiting. Settings holds the lock for the length of
+ * one write, so a longer wait only freezes input behind a stalled holder.
+ */
+#define CONF_LOCK_WAIT_MS 100
+#define CONF_RETRY_MS 1000       /* after a failed write (a full disk, say), the next try */
 
 struct rect { double x, y, w, h; };
 
@@ -123,6 +130,12 @@ struct home {
 
 	char conf_path[1024];
 	struct home_conf conf;
+	char *disk_text;               /* the file as Home last read or wrote it (NULL: none) */
+	size_t disk_len;
+	bool save_pending;             /* the lock was busy or the write failed: write again from home_tick */
+	long long save_retry_ms;       /* not before this (mono_ms), after a failed write; 0: it didn't fail */
+	int reloads, conf_refused;     /* outside changes taken; files left alone (tests, logs) */
+	uint64_t refused_hash;         /* the file Home last refused to load, logged once */
 	struct catalog cat;
 	char builtin_root[1024], system_root[1024], native_root[1024];
 	struct manifest native_cat;    /* native/app-category: App category's settings */
@@ -166,7 +179,7 @@ struct home {
 	int ino;
 	struct { int wd; char *dir; } watch[64];
 	int nwatch;
-	int wd_apps[16], wd_cat[3], wd_shellconf, wd_eink;
+	int wd_apps[16], wd_cat[3], wd_shellconf, wd_eink, wd_conf;
 
 	/* images */
 	struct imgq *iq;

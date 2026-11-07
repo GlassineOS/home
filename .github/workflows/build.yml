@@ -7,12 +7,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      # GlassineOS/ui (the voices and the drawing) is cloned by test/ui.sh at GLASSINE_UI_REF;
-      # home-needs carries what Home added to it (ui_icon_material, ui_hatch) until it merges.
+      # GlassineOS/ui (the voices and the drawing) is cloned by test/ui.sh at GLASSINE_UI_REF (main).
       # The renders land in out/renders and are kept as an artifact.
       - name: make check on Alpine
-        env:
-          GLASSINE_UI_REF: home-needs
         run: |
           docker run --rm -e GLASSINE_UI_REF -v "$PWD":/src -w /src alpine:3.24 sh -euc '
             apk add -q build-base lua5.4-dev pkgconf linux-headers git curl \

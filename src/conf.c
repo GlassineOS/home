@@ -7,8 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/random.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "manifest.h"
@@ -139,6 +141,7 @@ static bool parse(const char *text, size_t len, struct home_conf *c, char *err, 
 		}
 	}
 	const struct value *ws = ok ? v_map_get(root, "widget") : NULL;
+	c->has_widgets = ws != NULL;
 	if (ws && (ws->t != V_ARR || ws->u.a.n > CONF_MAX_WIDGETS)) {
 		snprintf(err, errlen, "widget: must be [[widget]] tables, at most %d", CONF_MAX_WIDGETS);
 		ok = false;
@@ -166,51 +169,80 @@ static bool parse(const char *text, size_t len, struct home_conf *c, char *err, 
 	return ok;
 }
 
-bool conf_load(const char *path, struct home_conf *c, char *err, size_t errlen)
+/* The file's bytes; NULL with *missing for no file, NULL with an error otherwise. */
+static char *read_text(const char *path, size_t *len, bool *missing, char *err, size_t errlen)
 {
-	memset(c, 0, sizeof *c);
-	err[0] = 0;
+	*missing = false;
+	*len = 0;
 	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-	if (fd < 0)
-		return errno == ENOENT; /* no layout yet */
-	struct stat st;
+	if (fd < 0) {
+		if (errno == ENOENT)
+			*missing = true;
+		else
+			snprintf(err, errlen, "%s: %s", path, strerror(errno));
+		return NULL;
+	}
+	struct stat st = { 0 };
 	char *text = NULL;
 	ssize_t n = -1;
 	if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size <= MAX_CONF && (text = malloc((size_t)st.st_size + 1)))
 		n = read(fd, text, (size_t)st.st_size);
 	close(fd);
-	if (n != st.st_size) {
-		/* an I/O problem, not a broken file: leave it where it is */
+	if (n < 0 || n != st.st_size) {
 		free(text);
 		snprintf(err, errlen, "%s: can't read it", path);
-		c->read_only = true;
-		return false;
+		return NULL;
 	}
-	bool ok = parse(text, (size_t)n, c, err, errlen);
-	free(text);
-	if (ok)
+	text[n] = 0;
+	*len = (size_t)n;
+	return text;
+}
+
+bool conf_parse(const char *text, size_t len, struct home_conf *c, char *err, size_t errlen)
+{
+	memset(c, 0, sizeof *c);
+	err[0] = 0;
+	if (parse(text, len, c, err, errlen))
 		return true;
 	bool ro = c->read_only;
 	conf_free(c);
 	c->read_only = ro;
-	if (ro)
-		return false;
-	/* keep the unreadable file for the user, start empty */
-	char aside[4200];
-	snprintf(aside, sizeof aside, "%s.broken", path);
-	if (rename(path, aside) == 0) {
-		size_t l = strlen(err);
-		snprintf(err + l, errlen - l, "%s(kept as %s)", l ? " " : "", aside);
-	}
 	return false;
 }
 
-bool conf_save(const char *path, const struct home_conf *c, char *err, size_t errlen)
+char *conf_read(const char *path, size_t *len, enum conf_state *state, struct home_conf *c, char *err, size_t errlen)
 {
-	if (c->read_only) {
-		snprintf(err, errlen, "the layout was written by a newer Home; not overwriting it");
-		return false;
+	memset(c, 0, sizeof *c);
+	err[0] = 0;
+	bool missing;
+	char *text = read_text(path, len, &missing, err, errlen);
+	if (!text) {
+		*state = missing ? CONF_MISSING : CONF_UNREADABLE;
+		return NULL;
 	}
+	if (parse(text, *len, c, err, errlen)) {
+		*state = CONF_OK;
+		return text;
+	}
+	*state = c->read_only ? CONF_NEWER : CONF_BROKEN;
+	conf_free(c);
+	return text;
+}
+
+bool conf_load(const char *path, struct home_conf *c, char *err, size_t errlen)
+{
+	size_t len;
+	enum conf_state st;
+	free(conf_read(path, &len, &st, c, err, errlen));
+	if (st == CONF_OK || st == CONF_MISSING)
+		return true;
+	/* broken, newer or unreadable: the file stays where it is, untouched and not to be overwritten */
+	c->read_only = true;
+	return false;
+}
+
+char *conf_format(const struct home_conf *c, size_t *len, char *err, size_t errlen)
+{
 	struct buf b = { 0 };
 	buf_adds(&b, "# glassine-home: the widgets in order. Pages follow from packing.\n");
 	buf_addf(&b, "version = %d\n", CONF_VERSION);
@@ -225,6 +257,8 @@ bool conf_save(const char *path, const struct home_conf *c, char *err, size_t er
 		}
 		buf_adds(&b, "]\n");
 	}
+	if (!c->n)
+		buf_adds(&b, "widget = []\n"); /* emptied on purpose; no widget key = never laid out */
 	for (size_t i = 0; i < c->n; i++) {
 		const struct instance *w = &c->w[i];
 		struct value *id = v_str(w->widget);
@@ -242,26 +276,79 @@ bool conf_save(const char *path, const struct home_conf *c, char *err, size_t er
 			if (!toml_put_value(&b, w->props)) {
 				snprintf(err, errlen, "widget %zu: settings can't be written", i + 1);
 				buf_free(&b);
-				return false;
+				return NULL;
 			}
 			buf_adds(&b, "\n");
 		}
 	}
+	buf_add(&b, "", 1);
+	*len = b.len - 1;
+	return b.p;
+}
 
+/* the config directories, if new (~/.config, then glassine) */
+static void make_dirs(const char *path)
+{
+	char dirbuf[4096], parent[4096];
+	snprintf(dirbuf, sizeof dirbuf, "%s", path);
+	char *dir = dirname(dirbuf);
+	snprintf(parent, sizeof parent, "%s", dir);
+	mkdir(dirname(parent), 0700);
+	mkdir(dir, 0700);
+}
+
+int conf_lock(const char *path, int timeout_ms)
+{
+	char lp[4200];
+	snprintf(lp, sizeof lp, "%s.lock", path);
+	make_dirs(path);
+	int fd = open(lp, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (fd < 0)
+		return -1;
+	if (timeout_ms < 0) {
+		while (flock(fd, LOCK_EX) < 0)
+			if (errno != EINTR) {
+				close(fd);
+				return -1;
+			}
+		return fd;
+	}
+	struct timespec t0, now;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (;;) {
+		if (!flock(fd, LOCK_EX | LOCK_NB))
+			return fd;
+		if (errno != EWOULDBLOCK && errno != EINTR)
+			break;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if ((now.tv_sec - t0.tv_sec) * 1000L + (now.tv_nsec - t0.tv_nsec) / 1000000L >= timeout_ms)
+			break;
+		struct timespec ts = { 0, 5 * 1000000L };
+		nanosleep(&ts, NULL);
+	}
+	close(fd);
+	errno = EWOULDBLOCK;
+	return -1;
+}
+
+void conf_unlock(int fd)
+{
+	if (fd >= 0)
+		close(fd); /* closing the last descriptor releases the lock */
+}
+
+bool conf_write_text(const char *path, const char *text, size_t len, char *err, size_t errlen)
+{
 	char dirbuf[4096], tmp[4200];
 	snprintf(dirbuf, sizeof dirbuf, "%s", path);
 	char *dir = dirname(dirbuf);
 	snprintf(tmp, sizeof tmp, "%s.tmp", path);
-	/* the config directories, if new (~/.config, then glassine) */
-	char parent[4096];
-	snprintf(parent, sizeof parent, "%s", dir);
-	mkdir(dirname(parent), 0700);
-	mkdir(dir, 0700);
+	make_dirs(path);
 	int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
 	bool ok = fd >= 0;
 	size_t off = 0;
-	while (ok && off < b.len) {
-		ssize_t w = write(fd, b.p + off, b.len - off);
+	while (ok && off < len) {
+		ssize_t w = write(fd, text + off, len - off);
 		if (w < 0 && errno == EINTR)
 			continue;
 		if (w <= 0)
@@ -285,8 +372,87 @@ bool conf_save(const char *path, const struct home_conf *c, char *err, size_t er
 			close(dfd);
 		}
 	}
-	buf_free(&b);
 	return ok;
+}
+
+bool conf_save(const char *path, const struct home_conf *c, char *err, size_t errlen)
+{
+	if (c->read_only) {
+		snprintf(err, errlen, "the layout was written by a newer Home; not overwriting it");
+		return false;
+	}
+	size_t len;
+	char *text = conf_format(c, &len, err, errlen);
+	if (!text)
+		return false;
+	int lk = conf_lock(path, -1);
+	if (lk < 0) {
+		snprintf(err, errlen, "%s.lock: %s", path, strerror(errno));
+		free(text);
+		return false;
+	}
+	bool ok = conf_write_text(path, text, len, err, errlen);
+	conf_unlock(lk);
+	free(text);
+	return ok;
+}
+
+bool conf_favourites_equal(const struct home_conf *a, const struct home_conf *b)
+{
+	if (a->nfav != b->nfav)
+		return false;
+	for (size_t i = 0; i < a->nfav; i++)
+		if (strcmp(a->favourites[i], b->favourites[i]))
+			return false;
+	return true;
+}
+
+static bool props_equal(const struct value *a, const struct value *b)
+{
+	size_t na = a ? a->u.m.n : 0, nb = b ? b->u.m.n : 0;
+	if (!na || !nb)
+		return na == nb;
+	return v_equal(a, b);
+}
+
+bool conf_instance_equal(const struct instance *a, const struct instance *b)
+{
+	return !strcmp(a->uuid, b->uuid) && !strcmp(a->widget, b->widget) && a->size == b->size &&
+	       props_equal(a->props, b->props);
+}
+
+bool conf_widgets_equal(const struct home_conf *a, const struct home_conf *b)
+{
+	if (a->n != b->n)
+		return false;
+	for (size_t i = 0; i < a->n; i++)
+		if (!conf_instance_equal(&a->w[i], &b->w[i]))
+			return false;
+	return true;
+}
+
+void conf_take_favourites(struct home_conf *dst, struct home_conf *src)
+{
+	for (size_t i = 0; i < dst->nfav; i++)
+		free(dst->favourites[i]);
+	free(dst->favourites);
+	dst->favourites = src->favourites;
+	dst->nfav = src->nfav;
+	src->favourites = NULL;
+	src->nfav = 0;
+}
+
+void conf_take_widgets(struct home_conf *dst, struct home_conf *src)
+{
+	for (size_t i = 0; i < dst->n; i++) {
+		free(dst->w[i].widget);
+		v_free(dst->w[i].props);
+	}
+	free(dst->w);
+	dst->w = src->w;
+	dst->n = src->n;
+	src->w = NULL;
+	src->n = 0;
 }
 
 int conf_find(const struct home_conf *c, const char *uuid)

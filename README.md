@@ -59,6 +59,10 @@ voices, portrait and landscape, drawn offscreen from the fixtures in `test/scree
 - Built-in widgets are installed in `/usr/share/glassine-home/widgets`; App category's settings
   script in `/usr/share/glassine-home/native`. Favourites live in the layout file; the shell's old
   `~/.config/glassine-shell/favourites` is imported once, when Home starts without a layout file.
+- The layout file, `~/.config/glassine/home.conf`, is shared with Settings, which edits its
+  favourites: its format and the rules for writing it (a lock, temp + fsync + rename) are in
+  `docs/home-conf.md`. Home writes under the same lock and reloads the file when it changes
+  outside; a file it can't read is left alone.
 
 The seccomp filter supports x86_64 and aarch64.
 

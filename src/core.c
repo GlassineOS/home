@@ -142,8 +142,11 @@ static void cards_sync(struct home *h)
 	struct card *nc = calloc(h->conf.n ? h->conf.n : 1, sizeof *nc);
 	if (!nc)
 		return;
-	/* a run in flight follows its instance, not its index: a remove or a swap reorders */
-	char run_uuid[37] = "";
+	/* a run in flight and the open settings sheet follow their instance, not its index:
+	 * a remove, a swap or an outside change of home.conf reorders */
+	char run_uuid[37] = "", sheet_uuid[37] = "";
+	if (h->sheet_card >= 0 && (size_t)h->sheet_card < h->ncards)
+		snprintf(sheet_uuid, sizeof sheet_uuid, "%s", h->cards[h->sheet_card].uuid);
 	if (h->run && h->run_card >= 0 && (size_t)h->run_card < h->ncards)
 		snprintf(run_uuid, sizeof run_uuid, "%s", h->cards[h->run_card].uuid);
 	for (size_t i = 0; i < h->conf.n; i++) {
@@ -187,20 +190,206 @@ static void cards_sync(struct home *h)
 	h->cards = nc;
 	h->ncards = h->conf.n;
 	h->run_card = run_uuid[0] ? conf_find(&h->conf, run_uuid) : -1; /* -1: removed, the result is dropped */
-	if (h->sheet == SHEET_SETTINGS && (h->sheet_card < 0 || (size_t)h->sheet_card >= h->ncards))
+	h->sheet_card = sheet_uuid[0] ? conf_find(&h->conf, sheet_uuid) : -1;
+	if (h->sheet == SHEET_SETTINGS && h->sheet_card < 0)
 		h->sheet = SHEET_NONE;
 }
 
+/* ---- the layout file, shared with Settings (docs/home-conf.md) ----------------------- */
+
+static int watch_dir(struct home *h, const char *dir, uint32_t mask);
+
+static void watch_conf(struct home *h)
+{
+	if (h->wd_conf >= 0)
+		return;
+	char d[1024];
+	snprintf(d, sizeof d, "%s", h->conf_path);
+	char *sl = strrchr(d, '/');
+	if (sl && sl != d)
+		*sl = 0;
+	h->wd_conf = watch_dir(h, d, INO_DATA);
+}
+
+static bool same_as_disk(const struct home *h, const char *text, size_t len)
+{
+	if (!text || !h->disk_text)
+		return !text && !h->disk_text;
+	return len == h->disk_len && !memcmp(text, h->disk_text, len);
+}
+
+/*
+ * Takes from d (the file as it is now) the favourites and/or the widgets. A widget
+ * that is gone disappears; one whose widget or settings changed runs again; the page,
+ * Arrange and an open sheet stay (the sheet closes when its widget went). Returns true
+ * when what Home shows changed.
+ */
+static bool adopt(struct home *h, struct home_conf *d, bool take_fav, bool take_widgets)
+{
+	bool changed = false;
+	if (take_fav && !conf_favourites_equal(&h->conf, d)) {
+		conf_take_favourites(&h->conf, d);
+		changed = true;
+	}
+	if (take_widgets && !conf_widgets_equal(&h->conf, d)) {
+		char (*rerun)[37] = calloc(d->n ? d->n : 1, sizeof *rerun);
+		size_t nr = 0;
+		for (size_t i = 0; rerun && i < d->n; i++) {
+			int k = conf_find(&h->conf, d->w[i].uuid);
+			if (k < 0)
+				continue;
+			struct instance t = d->w[i];
+			t.size = h->conf.w[k].size;
+			if (!conf_instance_equal(&h->conf.w[k], &t))
+				memcpy(rerun[nr++], d->w[i].uuid, 37);
+		}
+		conf_take_widgets(&h->conf, d);
+		cards_sync(h);
+		for (size_t i = 0; i < nr; i++) {
+			int k = conf_find(&h->conf, rerun[i]);
+			if (k < 0)
+				continue;
+			struct card *c = &h->cards[k];
+			c->want_run = true;
+			c->trig = TRIGGER_SETTINGS;
+			c->want_edit = h->sheet == SHEET_SETTINGS && h->sheet_card == k;
+			c->apage = 0;
+		}
+		free(rerun);
+		h->focus = -1;
+		changed = true;
+	}
+	return changed;
+}
+
+/*
+ * The file changed since Home last read or wrote it, and parses: takes the parts Home
+ * hasn't changed since then (all of it, unless an earlier write is still waiting for the
+ * lock). Settings changes only favourites, Home's Arrange only the widgets, so the two
+ * merge; when both changed the same part, Home's write wins.
+ */
+static bool merge_disk(struct home *h, struct home_conf *d, bool *kept_mine)
+{
+	struct home_conf base;
+	char err[256];
+	if (!h->disk_text || !conf_parse(h->disk_text, h->disk_len, &base, err, sizeof err))
+		memset(&base, 0, sizeof base);
+	bool fav_mine = !conf_favourites_equal(&h->conf, &base), w_mine = !conf_widgets_equal(&h->conf, &base);
+	/* a file without a widget key was never laid out (Settings made it): Home's widgets stay */
+	if (!d->has_widgets && h->conf.n)
+		w_mine = true;
+	conf_free(&base);
+	h->conf.read_only = false;
+	*kept_mine = fav_mine || w_mine;
+	return adopt(h, d, !fav_mine, !w_mine);
+}
+
+/*
+ * Writes the layout under the lock, after taking in what changed outside since Home last
+ * looked. When it can't (the lock stays busy, or the write fails), the change stays in
+ * memory and save_pending makes home_tick try again; nothing waits for the lock then.
+ */
 static void save_conf(struct home *h)
 {
 	char err[256];
 	if (h->conf.read_only)
 		return;
-	if (!conf_save(h->conf_path, &h->conf, err, sizeof err))
-		fprintf(stderr, "glassine-home: %s\n", err);
+	bool was_pending = h->save_pending;
+	int lk = conf_lock(h->conf_path, was_pending ? 0 : CONF_LOCK_WAIT_MS);
+	if (lk < 0) {
+		if (!was_pending)
+			fprintf(stderr, "glassine-home: %s.lock is held; writing the layout when it is free\n", h->conf_path);
+		h->save_pending = true;
+		return;
+	}
+	h->save_pending = false;
+	size_t len, dlen;
+	enum conf_state st;
+	struct home_conf d;
+	char *disk = conf_read(h->conf_path, &dlen, &st, &d, err, sizeof err);
+	if (!same_as_disk(h, disk, dlen)) {
+		bool mine;
+		if (st == CONF_OK) {
+			if (merge_disk(h, &d, &mine))
+				h->dirty_bg = true;
+			/* what was adopted is now what Home last read: if the write below fails, a later
+			 * outside change must not find Settings' favourites counted as Home's own */
+			free(h->disk_text);
+			h->disk_text = disk;
+			h->disk_len = dlen;
+			disk = NULL;
+		} else if (st != CONF_MISSING) {
+			/* broken, newer or unreadable from outside: Home keeps what it shows and leaves the file */
+			fprintf(stderr, "glassine-home: %s; not writing over it\n", err[0] ? err : h->conf_path);
+			h->conf_refused++;
+			conf_free(&d);
+			free(disk);
+			conf_unlock(lk);
+			h->save_retry_ms = 0;
+			return;
+		}
+	}
+	conf_free(&d);
+	free(disk);
+	char *text = conf_format(&h->conf, &len, err, sizeof err);
+	if (text && conf_write_text(h->conf_path, text, len, err, sizeof err)) {
+		free(h->disk_text);
+		h->disk_text = text;
+		h->disk_len = len;
+		h->save_retry_ms = 0;
+	} else {
+		if (!h->save_retry_ms) /* once per run of failures */
+			fprintf(stderr, "glassine-home: %s; keeping the change and trying again\n", err);
+		free(text);
+		h->save_pending = true;
+		h->save_retry_ms = mono_ms() + CONF_RETRY_MS;
+	}
+	conf_unlock(lk);
+	watch_conf(h);
 }
 
-/* A new Home: Continue reading, Favourite apps and All apps; favourites from the shell's list. */
+/* home.conf was replaced or written in place by someone else (or by Home: then it reads the same). */
+static void conf_changed(struct home *h)
+{
+	char err[256];
+	size_t len;
+	enum conf_state st;
+	struct home_conf d;
+	char *disk = conf_read(h->conf_path, &len, &st, &d, err, sizeof err);
+	if (same_as_disk(h, disk, len)) {
+		free(disk);
+		return;
+	}
+	if (st == CONF_OK) {
+		bool mine;
+		if (merge_disk(h, &d, &mine))
+			h->dirty_bg = true;
+		free(h->disk_text);
+		h->disk_text = disk;
+		h->disk_len = len;
+		disk = NULL;
+		h->reloads++;
+		h->refused_hash = 0;
+		/* a change Home couldn't write (the lock, or a file it couldn't read) goes in now */
+		if (mine || h->save_pending)
+			save_conf(h);
+	} else if (st == CONF_MISSING) {
+		fprintf(stderr, "glassine-home: %s was removed; keeping the layout, written again at the next change\n",
+			h->conf_path);
+	} else if (!disk || hash64(disk, len) != h->refused_hash) {
+		fprintf(stderr, "glassine-home: %s; keeping the layout and not writing over it\n", err[0] ? err : h->conf_path);
+		h->conf_refused++;
+		h->refused_hash = disk ? hash64(disk, len) : 0;
+	}
+	conf_free(&d);
+	free(disk);
+}
+
+/*
+ * A new Home (no file, or one without a widget key, as Settings creates it for its
+ * favourites): Continue reading, Favourite apps and All apps; without favourites in the
+ * file, the shell's old list.
+ */
 static void first_layout(struct home *h)
 {
 	if (catalog_find(&h->cat, "builtin/reading"))
@@ -210,7 +399,7 @@ static void first_layout(struct home *h)
 	char d[1024], p[1100];
 	shell_conf_dir(d, sizeof d);
 	snprintf(p, sizeof p, "%s/favourites", d);
-	FILE *f = fopen(p, "re");
+	FILE *f = h->conf.nfav ? NULL : fopen(p, "re");
 	if (f) {
 		char line[APP_ID_MAX];
 		while (fgets(line, sizeof line, f)) {
@@ -233,6 +422,20 @@ static void first_layout(struct home *h)
 static int watch_dir(struct home *h, const char *dir, uint32_t mask)
 {
 	return h->ino >= 0 ? inotify_add_watch(h->ino, dir, mask | IN_ONLYDIR) : -1;
+}
+
+/* A watch Home keeps for itself (inotify gives one wd per directory, shared with cards' watches). */
+static bool static_wd(const struct home *h, int wd)
+{
+	if (wd < 0)
+		return false;
+	for (int i = 0; i < 16; i++)
+		if (h->wd_apps[i] == wd)
+			return true;
+	for (int i = 0; i < 3; i++)
+		if (h->wd_cat[i] == wd)
+			return true;
+	return wd == h->wd_shellconf || wd == h->wd_eink || wd == h->wd_conf;
 }
 
 /* Watches the parent directories of every file a card's last run read. */
@@ -261,7 +464,8 @@ static void rewatch(struct home *h)
 			i++;
 			continue;
 		}
-		inotify_rm_watch(h->ino, h->watch[i].wd);
+		if (!static_wd(h, h->watch[i].wd))
+			inotify_rm_watch(h->ino, h->watch[i].wd); /* one watch per directory: keep it if Home needs it too */
 		free(h->watch[i].dir);
 		h->watch[i] = h->watch[--h->nwatch];
 	}
@@ -296,6 +500,7 @@ static void watch_static(struct home *h)
 	if (sl && sl != e)
 		*sl = 0;
 	h->wd_eink = watch_dir(h, e, INO_DATA);
+	watch_conf(h);
 }
 
 /* ---- setup ---------------------------------------------------------------------- */
@@ -315,6 +520,12 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 	h->focus = -1;
 	h->press_hit = -1;
 	h->sheet_card = -1;
+	h->run_card = -1;
+	h->wd_conf = h->wd_shellconf = h->wd_eink = -1;
+	for (int i = 0; i < 16; i++)
+		h->wd_apps[i] = -1;
+	for (int i = 0; i < 3; i++)
+		h->wd_cat[i] = -1;
 	h->ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	const char *now = getenv("GLASSINE_HOME_NOW");
 	h->now_s = now ? atoll(now) : 0;
@@ -340,11 +551,17 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 		snprintf(h->conf_path, sizeof h->conf_path, "%s", cp);
 	else if (!conf_default_path(h->conf_path, sizeof h->conf_path))
 		snprintf(h->conf_path, sizeof h->conf_path, "/tmp/glassine-home.conf");
-	struct stat st;
-	bool fresh = stat(h->conf_path, &st) != 0 && errno == ENOENT;
-	if (!conf_load(h->conf_path, &h->conf, err, sizeof err))
-		fprintf(stderr, "glassine-home: %s\n", err);
-	if (fresh)
+	/* one read of the file: what Home loads and what an outside change is compared with */
+	enum conf_state cs;
+	h->disk_text = conf_read(h->conf_path, &h->disk_len, &cs, &h->conf, err, sizeof err);
+	bool fresh = cs == CONF_MISSING, loaded = cs == CONF_OK || fresh;
+	if (!loaded) {
+		/* broken, newer or unreadable: Home starts empty and leaves the file alone (FR-043); its
+		 * changes are written when a readable file appears (conf_changed) */
+		h->conf.read_only = true;
+		fprintf(stderr, "glassine-home: %s; leaving it as it is\n", err[0] ? err : h->conf_path);
+	}
+	if (fresh || (loaded && !h->conf.has_widgets))
 		first_layout(h);
 	cards_sync(h);
 	h->iq = imgq_start();
@@ -357,6 +574,10 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 
 void home_free(struct home *h)
 {
+	/* one last try for a change still waiting for the lock or a failed write (no waiting for
+	 * the lock; if it's held or the write fails again, the change is lost with the process) */
+	if (h->save_pending)
+		save_conf(h);
 	if (h->run) {
 		run_free(h->run);
 		run_result_free(&h->rr);
@@ -368,6 +589,7 @@ void home_free(struct home *h)
 	catalog_free(&h->cat);
 	apps_free(&h->apps);
 	conf_free(&h->conf);
+	free(h->disk_text);
 	if (h->have_native_cat)
 		manifest_free(&h->native_cat);
 	for (int i = 0; i < h->nwatch; i++)
@@ -637,13 +859,13 @@ static void apply_set(struct home *h, int ci, const struct value *set)
 	v_free(eff);
 	v_free(in->props);
 	in->props = saved;
-	save_conf(h);
 	card_props(h, c, in);
 	c->want_run = true;
 	c->trig = TRIGGER_SETTINGS;
 	c->want_edit = true;
 	c->apage = 0;
 	h->dirty_now = true;
+	save_conf(h); /* last: taking in an outside change may move cards */
 }
 
 /* ---- the gallery ---------------------------------------------------------------- */
@@ -677,8 +899,13 @@ static void add_widget(struct home *h, int row)
 	v_free(props);
 	if (idx < 0)
 		return;
+	char uuid[37];
+	memcpy(uuid, h->conf.w[idx].uuid, sizeof uuid);
 	save_conf(h);
 	cards_sync(h);
+	idx = conf_find(&h->conf, uuid);
+	if (idx < 0)
+		return;
 	h->sheet = SHEET_NONE;
 	h->page = page_of(h, (size_t)idx);
 	if (card_has_settings(h, &h->cards[idx]))
@@ -1067,6 +1294,12 @@ static int region_for(const struct home *h, double cx, double cy)
 {
 	int best = -1;
 	double area = 1e18;
+	/* a sheet lies over the page: what changes inside it is the sheet's, not a card's beneath */
+	for (int i = 0; i < h->nregions; i++) {
+		const struct rect *r = &h->regions[i].r;
+		if (h->regions[i].kind == R_SHEET && cx >= r->x && cx < r->x + r->w && cy >= r->y && cy < r->y + r->h)
+			return i;
+	}
 	for (int i = 0; i < h->nregions; i++) {
 		const struct rect *r = &h->regions[i].r;
 		if (cx >= r->x && cx < r->x + r->w && cy >= r->y && cy < r->y + r->h && r->w * r->h < area) {
@@ -1185,9 +1418,22 @@ int home_fds(struct home *h, int *fds, int max)
 	return n;
 }
 
-static void inotify_event(struct home *h, int wd, const char *name)
+static void inotify_event(struct home *h, int wd, uint32_t mask, const char *name)
 {
 	long long now = mono_ms();
+	if (wd == h->wd_conf && wd >= 0 && (mask & IN_IGNORED)) {
+		/* the config folder was removed: its watch is gone; the next write makes the folder and watches it again */
+		h->wd_conf = -1;
+		return;
+	}
+	if (wd == h->wd_conf && wd >= 0 && name) {
+		const char *base = strrchr(h->conf_path, '/');
+		if (!strcmp(name, base ? base + 1 : h->conf_path)) {
+			if (mask & (IN_MOVED_TO | IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM))
+				conf_changed(h);
+			return;
+		}
+	}
 	for (int i = 0; i < 16; i++)
 		if (wd == h->wd_apps[i] && wd >= 0) {
 			apps_load(&h->apps);
@@ -1254,7 +1500,7 @@ void home_ready(struct home *h, int fd)
 		while ((n = read(h->ino, buf, sizeof buf)) > 0)
 			for (char *p = buf; p < buf + n;) {
 				struct inotify_event *e = (struct inotify_event *)p;
-				inotify_event(h, e->wd, e->len ? e->name : NULL);
+				inotify_event(h, e->wd, e->mask, e->len ? e->name : NULL);
 				p += sizeof *e + e->len;
 			}
 		return;
@@ -1303,6 +1549,15 @@ int home_tick(struct home *h)
 			long long left = (c->st.next_due - wall) * 1000;
 			if (left < wait)
 				wait = (int)(left < 0 ? 0 : left);
+		}
+	}
+	if (h->save_pending) {
+		if (now >= h->save_retry_ms)
+			save_conf(h);
+		if (h->save_pending) {
+			long long due = h->save_retry_ms > now ? h->save_retry_ms - now : 100;
+			if (wait > due)
+				wait = (int)(due > 100 ? 100 : due);
 		}
 	}
 	start_next_run(h);
