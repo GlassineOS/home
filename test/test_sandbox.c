@@ -210,6 +210,35 @@ static void files(void)
 	}
 }
 
+/* without /proc the real path of what was opened can't be checked: the read is refused */
+static void no_proc(void)
+{
+	char err[512];
+	struct manifest m;
+	if (!manifest_load(W("files"), &m, err, sizeof err)) {
+		fprintf(stderr, "files: %s\n", err);
+		CHECK(false);
+		return;
+	}
+	for (int np = 0; np < 2; np++) {
+		struct broker b;
+		broker_init(&b, &m, home);
+		b.test_no_proc = np;
+		long long size = 0;
+		int fd = broker_open(&b, "~/data/ok.txt", &size);
+		if (np) {
+			CHECK_INT(fd, -1);
+			CHECK_INT(errno, EACCES);
+		} else {
+			CHECK(fd >= 0 && size == 5);
+		}
+		if (fd >= 0)
+			close(fd);
+		broker_free(&b);
+	}
+	manifest_free(&m);
+}
+
 /* HOME=/: "~/" is then "/", which covers nothing, as "/" itself can't be listed */
 static void home_is_root(void)
 {
@@ -524,6 +553,7 @@ int main(void)
 	setup_home();
 	files();
 	home_is_root();
+	no_proc();
 	places();
 	data_files();
 	environment();

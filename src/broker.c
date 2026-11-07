@@ -213,14 +213,17 @@ static int open_beneath(int dirfd, const char *rel, bool force_fallback)
 	return open_beneath_walk(dirfd, rel);
 }
 
-/* True when the open fd's real path is under /proc, /sys, /dev or /run. */
-static bool in_system_area(int fd)
+/*
+ * True unless the open fd's real path is known and outside /proc, /sys, /dev and /run.
+ * Without /proc the real path can't be read, and the read is refused.
+ */
+static bool in_system_area(const struct broker *b, int fd)
 {
 	char fdp[64], real[4096];
-	snprintf(fdp, sizeof fdp, "/proc/self/fd/%d", fd);
+	snprintf(fdp, sizeof fdp, b->test_no_proc ? "/nonexistent/%d" : "/proc/self/fd/%d", fd);
 	ssize_t rl = readlink(fdp, real, sizeof real - 1);
 	if (rl <= 0)
-		return false;
+		return true;
 	real[rl] = 0;
 	return path_forbidden_root(real);
 }
@@ -269,7 +272,7 @@ int broker_open(struct broker *b, const char *req, long long *size)
 		return -1;
 	}
 	/* wherever the directory really is, it must not be a system area */
-	if (in_system_area(dfd)) {
+	if (in_system_area(b, dfd)) {
 		close(dfd);
 		errno = EACCES;
 		return -1;
@@ -282,7 +285,7 @@ int broker_open(struct broker *b, const char *req, long long *size)
 		return -1;
 	}
 	/* nor the file: a second line behind the directory's check, should a read ever cover "/" */
-	if (in_system_area(fd)) {
+	if (in_system_area(b, fd)) {
 		close(fd);
 		errno = EACCES;
 		return -1;
