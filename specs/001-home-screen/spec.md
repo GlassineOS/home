@@ -76,8 +76,8 @@ later with one partial refresh of that rectangle only; nothing else moves.
   4 × 3 side by side.
 - **FR-002**: A half widget is 2 columns, a wide one 4. Script widgets are one row tall; app widgets are 1, 2, 3 or
   5 rows (landscape caps at 3).
-- **FR-003**: A page packs its widgets in order (a half fills the first free half on the page, then the next
-  lane); a widget that no longer fits after a size change or a move spills to the front of the next page; empty
+- **FR-003**: A page packs its widgets in order (a half fills the first free half in its lane, the lane the
+  flow has reached, then the next lane; never a gap in an earlier lane); a widget that no longer fits after a size change or a move spills to the front of the next page; empty
   pages close up. A new widget goes on the last page, or a new page when that is full; adding never shrinks
   others.
 - **FR-004**: The header carries the date and status, the Home pager (only with more than one page) and Arrange.
