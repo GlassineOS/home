@@ -16,6 +16,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -1686,6 +1687,252 @@ static void arrange(struct zygote *z)
 	home_free(&h);
 }
 
+/* ---- the layout file shared with Settings ------------------------------------------- */
+
+static char *slurp(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return NULL;
+	static char b[65536];
+	size_t n = fread(b, 1, sizeof b - 1, f);
+	fclose(f);
+	b[n] = 0;
+	return b;
+}
+
+/* the file with its favourites replaced, as Settings writes it: every other line as it was */
+static void with_favourites(const char *favs, char *out, size_t n)
+{
+	char p[2048];
+	conf_path(p, sizeof p);
+	const char *t = slurp(p), *a = t ? strstr(t, "favourites = [") : NULL, *b = a ? strchr(a, ']') : NULL;
+	if (!b) {
+		snprintf(out, n, "no favourites in the file");
+		return;
+	}
+	snprintf(out, n, "%.*sfavourites = [%s]%s", (int)(a - t), t, favs, b + 1);
+}
+
+/* Settings' write: a temporary file beside it, renamed over; with the lock (left held when lk) or without */
+static void outside_write(const char *text, bool locked, int *lk)
+{
+	char p[2048], tmp[2200];
+	conf_path(p, sizeof p);
+	snprintf(tmp, sizeof tmp, "%s/.home.conf.settings", T);
+	int fd = locked ? conf_lock(p, -1) : -1;
+	CHECK(!locked || fd >= 0);
+	put(tmp, text);
+	CHECK(rename(tmp, p) == 0);
+	if (lk)
+		*lk = fd;
+	else
+		conf_unlock(fd);
+}
+
+/* the layout file, changed by hand: f(c) edits it, then it is written outside */
+static void outside_edit(void (*f)(struct home_conf *c, const char *arg), const char *arg)
+{
+	struct home_conf c;
+	char err[256], p[2048];
+	size_t len;
+	conf_path(p, sizeof p);
+	CHECK(conf_load(p, &c, err, sizeof err));
+	f(&c, arg);
+	char *text = conf_format(&c, &len, err, sizeof err);
+	CHECK(text != NULL);
+	if (text)
+		outside_write(text, true, NULL);
+	free(text);
+	conf_free(&c);
+}
+
+static void drop_widget(struct home_conf *c, const char *ref)
+{
+	for (size_t i = 0; i < c->n; i++)
+		if (!strcmp(c->w[i].widget, ref)) {
+			conf_remove(c, i);
+			return;
+		}
+}
+
+static void category_office(struct home_conf *c, const char *uuid)
+{
+	int i = conf_find(c, uuid);
+	if (i >= 0)
+		v_map_set(c->w[i].props, "category", v_str("Office"));
+}
+
+static int card_of(const struct home *h, const char *uuid)
+{
+	return conf_find(&h->conf, uuid);
+}
+
+static void shared(struct zygote *z)
+{
+	setenv("GLASSINE_HOME_VOICE", "white", 1);
+	reset();
+	struct home h;
+	struct home_io io = { .commit = on_commit };
+	home_init(&h, z, &io);
+	ui_draw_init();
+	home_resize(&h, 702, 884, 1);
+	home_appear(&h);
+	settle(&h);
+	char p[2048], text[8192], d[512];
+	conf_path(p, sizeof p);
+
+	/* Settings changes favourites without the lock: Home reloads, only Favourite apps redraws */
+	int c0 = h.commits, r0 = h.reloads;
+	with_favourites("\"foot\", \"koreader\", \"firefox-esr\"", text, sizeof text);
+	outside_write(text, false, NULL);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.reloads, r0 + 1);
+	CHECK_INT(h.commits, c0 + 1);
+	damage_names(&h, d, sizeof d);
+	CHECK_STR(d, "card3");
+	CHECK(home_is_fav(&h, "foot") && !home_is_fav(&h, "org.gnome.Calendar"));
+	CHECK_STR(h.conf.favourites[0], "foot");
+	CHECK_INT(h.page, 0);
+	CHECK_STR(slurp(p), text); /* Home doesn't write it back */
+
+	/* and with the lock still held: the reload doesn't wait for it */
+	int lk = -1;
+	c0 = h.commits;
+	with_favourites("\"foot\", \"koreader\", \"firefox-esr\", \"org.gnome.Calendar\"", text, sizeof text);
+	outside_write(text, true, &lk);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.reloads, r0 + 2);
+	CHECK_INT(h.commits, c0 + 1);
+	damage_names(&h, d, sizeof d);
+	CHECK_STR(d, "card3");
+	CHECK(home_is_fav(&h, "org.gnome.Calendar"));
+	conf_unlock(lk);
+
+	/* Home's write waits for Settings' lock, then keeps Settings' favourites and its own change */
+	CHECK(act(&h, A_ARRANGE, -1, d, sizeof d));
+	settle(&h);
+	char lockp[2100], tmp[2200];
+	snprintf(lockp, sizeof lockp, "%s.lock", p);
+	snprintf(tmp, sizeof tmp, "%s/.home.conf.settings", T);
+	with_favourites("\"koreader\"", text, sizeof text);
+	size_t tl = strlen(text);
+	int pfd[2];
+	CHECK(pipe(pfd) == 0);
+	pid_t kid = fork();
+	if (kid == 0) {
+		/* only system calls here: the parent has threads */
+		int fd = open(lockp, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		if (fd < 0 || flock(fd, LOCK_EX))
+			_exit(1);
+		if (write(pfd[1], "y", 1) != 1)
+			_exit(1);
+		struct timespec ts = { 0, 400 * 1000000L };
+		nanosleep(&ts, NULL);
+		int t = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+		if (t < 0 || write(t, text, tl) != (ssize_t)tl || fsync(t) || close(t) || rename(tmp, p))
+			_exit(1);
+		_exit(0); /* exit releases the lock */
+	}
+	char y = 0;
+	CHECK(read(pfd[0], &y, 1) == 1 && y == 'y');
+	long long t0 = ms();
+	c0 = h.commits;
+	CHECK(tap(&h, A_CTL_REMOVE, C_SKY, NULL));
+	long long waited = ms() - t0;
+	int st = -1;
+	waitpid(kid, &st, 0);
+	close(pfd[0]);
+	close(pfd[1]);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+	CHECK(waited >= 300);
+	CHECK_INT(h.commits, c0 + 1);
+	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 package-updates:h all-apps:3 "
+		     "app-category:2 photo-frame:w", "1 2 3 4 5 7 8 9");
+	struct home_conf c;
+	char err[256];
+	CHECK(conf_load(p, &c, err, sizeof err));
+	CHECK(c.nfav == 1 && !strcmp(c.favourites[0], "koreader"));
+	conf_free(&c);
+	CHECK(h.conf.nfav == 1 && !home_is_fav(&h, "foot"));
+	settle(&h);
+
+	/* a broken file from outside: Home stays as it is and doesn't write over it, not even after a change */
+	static const char BROKEN[] = "version = 1\nfavourites = 3\n";
+	char aside[2100];
+	snprintf(aside, sizeof aside, "%s.broken", p);
+	int f0 = h.conf_refused;
+	c0 = h.commits;
+	r0 = h.reloads;
+	outside_write(BROKEN, false, NULL);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.conf_refused, f0 + 1);
+	CHECK_INT(h.reloads, r0);
+	CHECK_INT(h.commits, c0);
+	CHECK_INT(h.ncards, 8);
+	CHECK(h.edit);
+	CHECK(access(aside, F_OK) != 0);
+	CHECK(act(&h, A_CTL_REMOVE, 4, d, sizeof d)); /* Updates */
+	CHECK_INT(h.ncards, 7);
+	CHECK_STR(slurp(p), BROKEN);
+	CHECK_INT(h.conf_refused, f0 + 2);
+	/* a newer version: the same */
+	outside_write("version = 2\nsomething = \"new\"\n", false, NULL);
+	loop(&h, true, 300, -1, NULL);
+	CHECK_INT(h.conf_refused, f0 + 3);
+	CHECK_STR(slurp(p), "version = 2\nsomething = \"new\"\n");
+	/* mended (the last good file, with favourites changed): Home takes the favourites, then
+	 * writes the change it kept */
+	struct home_conf good;
+	CHECK(conf_parse(h.disk_text, h.disk_len, &good, err, sizeof err));
+	free(good.favourites[0]);
+	good.favourites[0] = strdup("foot");
+	size_t gl;
+	char *gt = conf_format(&good, &gl, err, sizeof err);
+	outside_write(gt, true, NULL);
+	free(gt);
+	conf_free(&good);
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.reloads, r0 + 1);
+	CHECK(home_is_fav(&h, "foot") && !home_is_fav(&h, "koreader"));
+	CHECK_LAYOUT("reading:w notes-recent:h calendar-next:h favourites:2 all-apps:3 app-category:2 photo-frame:w",
+		     "1 2 3 4 7 8 9");
+	CHECK(conf_load(p, &c, err, sizeof err));
+	CHECK(c.nfav == 1 && !strcmp(c.favourites[0], "foot"));
+	conf_free(&c);
+
+	/* widgets changed outside while Arrange shows a widget's settings */
+	static const char CAT[] = "00000000-0000-4000-8000-000000000008";
+	page_with(&h, card_of(&h, CAT));
+	int page = h.page;
+	CHECK(act(&h, A_CTL_SETTINGS, card_of(&h, CAT), d, sizeof d));
+	settle(&h);
+	CHECK(h.sheet == SHEET_SETTINGS);
+	outside_edit((void (*)(struct home_conf *, const char *))drop_widget, "system/notes-recent");
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.ncards, 6);                    /* the removed widget is gone */
+	CHECK(h.edit && h.sheet == SHEET_SETTINGS); /* the sheet stays on its widget, now one place earlier */
+	CHECK_INT(h.sheet_card, card_of(&h, CAT));
+	CHECK_INT(h.sheet_card, 4);
+	CHECK_INT(h.page, page);
+	/* its settings changed outside: the card and the sheet follow */
+	outside_edit((void (*)(struct home_conf *, const char *))category_office, CAT);
+	loop(&h, true, 1500, -1, NULL);
+	settle(&h);
+	const struct value *cat = v_map_get(h.cards[card_of(&h, CAT)].props, "category");
+	CHECK(cat && cat->t == V_STR && !strcmp(cat->u.s.p, "Office"));
+	int item, row;
+	const struct value *office = edit_row(&h.cards[card_of(&h, CAT)], "Office", &item, &row);
+	CHECK(office && v_map_get(office, "selected"));
+	/* and removed outside: its sheet closes, Arrange stays */
+	outside_edit((void (*)(struct home_conf *, const char *))drop_widget, "home/app-category");
+	loop(&h, true, 1500, -1, NULL);
+	CHECK_INT(h.ncards, 5);
+	CHECK(h.sheet == SHEET_NONE && h.edit);
+	CHECK(h.page >= 0 && h.page < h.npages);
+	home_free(&h);
+}
+
 int main(void)
 {
 	setup();
@@ -1708,6 +1955,7 @@ int main(void)
 	helper_gone(&z2);
 	zygote_stop(&z2);
 	arrange(&z);
+	shared(&z);
 	zygote_stop(&z);
 	printf("renders in out/renders/\n");
 	return t_done("home");
