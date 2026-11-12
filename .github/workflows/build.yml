@@ -4,7 +4,12 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # the device is aarch64: the sandbox's syscall filter differs per architecture
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       # GlassineOS/ui (the voices and the drawing) is cloned by test/ui.sh at GLASSINE_UI_REF (main).
@@ -19,6 +24,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: renders
+          name: renders-${{ matrix.runner }}
           path: out/renders/
           if-no-files-found: ignore

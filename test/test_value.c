@@ -26,7 +26,9 @@ static void json_cases(void)
 	if (v)
 		CHECK_STR(canon(v), "{\"a\":true,\"b\":[1,2.5,\"x\xc3\xa9\"],\"c\":null}");
 	/* the canonical form reads back to the same bytes */
-	struct value *w = v_from_json(canon(v), strlen(canon(v)), 8, err, sizeof err);
+	/* canon() reuses one buffer: call it once, not twice in one argument list */
+	const char *c = canon(v);
+	struct value *w = v_from_json(c, strlen(c), 8, err, sizeof err);
 	CHECK(w && v_equal(v, w));
 	v_free(v);
 	v_free(w);
