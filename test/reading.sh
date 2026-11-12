@@ -34,8 +34,25 @@ check "same bytes twice" "$got" "$again"
 
 # what the run read (watched for on-change refresh)
 files=$(HOME="$h" "$run" -v "$top/widgets/reading" 2>&1 >/dev/null | sed "s|$h|~|")
-check "files read" "read: ~/.config/koreader/history.lua
+check "files read" "read: ~/.var/app/rocks.koreader.KOReader/config/koreader/history.lua
+read: ~/.config/koreader/history.lua
 read: ~/Books/The Lighthouse Keeper's Almanac.sdr/metadata.epub.lua" "$files"
+
+# the Flatpak's history alone (KOReader from Flathub)
+fp=.var/app/rocks.koreader.KOReader/config/koreader
+reset_home
+mkdir -p "$h/$fp"
+mv "$h/.config/koreader/history.lua" "$h/$fp/"
+want=$(sed "s|@HOME@|$h|g" "$fx/expected.json")
+check "flatpak history" "$want" "$(HOME="$h" "$run" "$top/widgets/reading")"
+# both: the book read last wins, whichever history has it
+cp "$h/$fp/history.lua" "$h/.config/koreader/history.lua"
+sed -i -e '4,7d' -e 's/1699000000/1800000000/' "$h/$fp/history.lua"
+got=$(HOME="$h" "$run" "$top/widgets/reading" | grep -c 'Small Gardens' || true)
+check "newer flatpak history wins" "1" "$got"
+sed -i 's/1800000000/1600000000/' "$h/$fp/history.lua"
+got=$(HOME="$h" "$run" "$top/widgets/reading" | grep -c 'Lighthouse' || true)
+check "newer package history wins" "1" "$got"
 
 # a library outside ~/Books, set in the places file
 reset_home

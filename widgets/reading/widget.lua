@@ -1,7 +1,12 @@
 -- SPDX-License-Identifier: GPL-2.0-or-later
 -- Continue reading: KOReader's last book, from its history and the book's .sdr metadata.
 
-local HISTORY = "~/.config/koreader/history.lua"
+-- KOReader as a package keeps its history in ~/.config, the Flatpak in its own ~/.var/app folder;
+-- with both, the one read last counts
+local HISTORIES = {
+  "~/.var/app/rocks.koreader.KOReader/config/koreader/history.lua",
+  "~/.config/koreader/history.lua",
+}
 
 local function nonempty(s)
   if type(s) == "string" and s:find("%S") then return s end
@@ -15,8 +20,15 @@ end
 
 return {
   render = function(ctx, props)
-    local history = ctx.load_lua(HISTORY)
-    local last = type(history) == "table" and history[1]
+    local last
+    for _, path in ipairs(HISTORIES) do
+      local history = ctx.load_lua(path)
+      local first = type(history) == "table" and history[1]
+      if type(first) == "table" and type(first.file) == "string" and
+          (not last or (tonumber(first.time) or 0) > (tonumber(last.time) or 0)) then
+        last = first
+      end
+    end
     if type(last) ~= "table" or type(last.file) ~= "string" then
       return { ui.title("Continue reading"), ui.text("Nothing read yet", { soft = true }) }
     end
