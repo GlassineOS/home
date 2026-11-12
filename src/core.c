@@ -529,7 +529,7 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 	h->ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	const char *now = getenv("GLASSINE_HOME_NOW");
 	h->now_s = now ? atoll(now) : 0;
-	snprintf(h->launch_cmd, sizeof h->launch_cmd, "%s", env_or("GLASSINE_HOME_LAUNCH", "glassine-shell launch"));
+	snprintf(h->launch_cmd, sizeof h->launch_cmd, "%s", env_or("GLASSINE_HOME_LAUNCH", "glassine-shell-wl launch"));
 	snprintf(h->hide_cmd, sizeof h->hide_cmd, "%s", env_or("GLASSINE_HOME_HIDE", "glassine-swayd home hide"));
 	snprintf(h->builtin_root, sizeof h->builtin_root, "%s",
 		 env_or("GLASSINE_HOME_WIDGETS", "/usr/share/glassine-home/widgets"));

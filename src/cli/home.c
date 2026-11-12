@@ -4,7 +4,7 @@
  * the session shows over the current screen.
  *
  * Environment (defaults in brackets):
- *   GLASSINE_HOME_LAUNCH   the command that opens an app [glassine-shell launch]; Home adds
+ *   GLASSINE_HOME_LAUNCH   the command that opens an app [glassine-shell-wl launch]; Home adds
  *                          the desktop id, new|here and, for a widget's file, the file
  *   GLASSINE_HOME_HIDE     the command that hides Home [glassine-swayd home hide]
  *   GLASSINE_HOME_WIDGETS  the built-in widgets [/usr/share/glassine-home/widgets]
