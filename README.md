@@ -40,7 +40,7 @@ voices, portrait and landscape, drawn offscreen from the fixtures in `test/scree
 
 ### How the screen behaves
 
-- Opens apps only through `glassine-shell launch DESKTOP-ID new|here` (a tap: new; the app menu's
+- Opens apps only through `glassine-shell-wl launch DESKTOP-ID new|here` (a tap: new; the app menu's
   "Open on this screen": here). A widget's file or a Settings page goes as a third word; the shell
   doesn't take it yet. Hides itself only with `glassine-swayd home hide` (Escape). Both commands
   can be replaced through the environment (`src/cli/home.c` lists it).
