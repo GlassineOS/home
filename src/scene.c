@@ -69,6 +69,15 @@ static double btn_r(void)
 	return H->v->btn.r[0] == UI_HALF ? 22 : H->v->btn.r[0];
 }
 
+/* A widget action Home can carry out now: an open whose app is installed (Settings always is). */
+static bool action_available(const struct value *a)
+{
+	const struct value *k = a ? v_map_get(a, "a") : NULL, *app = a ? v_map_get(a, "app") : NULL;
+	if (!k || k->t != V_STR || strcmp(k->u.s.p, "open"))
+		return true;
+	return app && app->t == V_STR && apps_resolve(&H->apps, app->u.s.p);
+}
+
 /* a square or pill button of the voice (design: btnBg + btnSh + btnR) */
 static void button_box(struct rect r, bool selected)
 {
@@ -534,17 +543,25 @@ static void paint_script(struct card *c, int ci, struct rect in)
 			double bw = 12 + (icon ? 26 : 0) + lw + 12;
 			if (bw > cw)
 				bw = cw;
+			/* an app that isn't installed: the button shows, greyed, says so, and does nothing */
+			bool off = !action_available(v_map_get(it, "action"));
+			const char *why = "Not installed";
+			double ww = off ? 8 + ui_text_w(&G, &lf, why, NULL) : 0;
+			if (bw + ww > cw)
+				bw = cw - ww > 0 ? cw - ww : cw;
 			struct rect b = { cx, y, bw, 36 };
-			bool sel = v_map_get(it, "selected") != NULL;
+			bool sel = !off && v_map_get(it, "selected") != NULL;
 			button_box(b, sel);
-			ui_col fg = sel ? v->selFg : INK;
+			ui_col fg = off ? UI_RULE : sel ? v->selFg : INK;
 			double tx = cx + 12;
 			if (icon) {
 				ui_icon_material(&G, icon, 20, tx + 10, y + 18, fg);
 				tx += 26;
 			}
 			ui_text(&G, &v->titleFont, label, tx, y + (36 - text_h(&v->titleFont)) / 2, 0, cx + bw - 12 - tx, fg, NULL);
-			if (!H->edit)
+			if (off && cx + bw + ww <= cx + cw)
+				ui_text(&G, &lf, why, cx + bw + 8, y + (36 - text_h(&lf)) / 2, 0, cw - bw - 8, SUB, NULL);
+			if (!H->edit && !off)
 				hit_add(b, A_WBUTTON, ci, (int)i, NULL, true, btn_r());
 			hh = 36;
 		} else {

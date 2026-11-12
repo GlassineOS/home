@@ -103,6 +103,8 @@ later with one partial refresh of that rectangle only; nothing else moves.
   one), text (one line, optionally soft), progress (0–1 with its number), list (up to 4 rows, more are cut),
   button (at most 2; it can only open an app, a file in an app, or a Settings page), meta (the bottom line), image
   slot (at most 2). Never pixels, colours, fonts or layout.
+  A button whose app isn't installed shows greyed with "Not installed" beside it and does nothing; it works
+  again as soon as the app is installed.
 - **FR-023**: Home runs a widget when a listed file changes, on its interval, and once when Home appears. It
   compares the output and redraws only cards whose output changed, together, as one partial refresh.
 - **FR-024**: A run gets 200 ms and 4 MB. It can read only the files its manifest lists (and a KOReader book's
