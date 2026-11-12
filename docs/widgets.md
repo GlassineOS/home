@@ -131,7 +131,8 @@ boundary.
 Actions: `ui.open(app, file)` (an app id, an optional absolute file path; an id that isn't a
 desktop id matches the last part of one, case-insensitively, so `koreader` also finds
 `rocks.koreader.KOReader`, and the one opened last wins) and `ui.settings(page)`.
-Nothing else can run.
+Nothing else can run. A button whose app isn't installed shows greyed with "Not installed" beside it
+and can't be tapped; Home shows it again as usual once the app is installed.
 
 Image slots: `src` is `file:PATH` (inside `reads`), `cover:PATH` (an ebook's cover: an absolute
 path without `.` or `..` parts, outside `/proc`, `/sys`, `/dev` and `/run`; Home shows the book's

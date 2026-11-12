@@ -708,6 +708,36 @@ static void commands(struct zygote *z)
 	CHECK_INT(log_lines(l, 4), 4);
 	CHECK_STR(l[3], "launch glassine-settings new updates");
 
+	/* KOReader not installed: Continue shows greyed with "Not installed", and a tap there
+	 * starts nothing; installed again, the button works again */
+	{
+		char saved[8][APP_ID_MAX];
+		size_t si[8], ns = 0;
+		b = find_hit(&h, A_WBUTTON, C_READING, NULL);
+		CHECK(b >= 0);
+		struct rect was = b >= 0 ? h.hits[b].r : (struct rect){ 0 };
+		for (size_t i = 0; i < h.apps.n && ns < 8; i++)
+			if (strstr(h.apps.a[i].id, "koreader")) {
+				si[ns] = i;
+				snprintf(saved[ns], APP_ID_MAX, "%s", h.apps.a[i].id);
+				snprintf(h.apps.a[i].id, APP_ID_MAX, "gone.removed%zu", ns);
+				ns++;
+			}
+		CHECK_INT((int)ns, 2); /* the package and the Flatpak */
+		h.dirty_now = true;
+		save(&h, "white", "portrait", "not-installed");
+		CHECK(find_hit(&h, A_WBUTTON, C_READING, NULL) < 0);
+		home_press(&h, was.x + was.w / 2, was.y + was.h / 2);
+		home_release(&h, was.x + was.w / 2, was.y + was.h / 2);
+		home_tick(&h);
+		CHECK_INT(log_lines(l, 4), 4);
+		for (size_t k = 0; k < ns; k++)
+			snprintf(h.apps.a[si[k]].id, APP_ID_MAX, "%s", saved[k]);
+		h.dirty_now = true;
+		home_paint(&h, true);
+		CHECK(find_hit(&h, A_WBUTTON, C_READING, NULL) >= 0);
+	}
+
 	/* keys: Tab to the first app of Favourite apps and Enter; Escape hides */
 	int n = 0;
 	for (int i = 0; i < 64; i++) {
