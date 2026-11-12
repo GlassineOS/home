@@ -959,7 +959,11 @@ static void do_action(struct home *h, struct card *c, const struct value *a)
 	if (!strcmp(k->u.s.p, "open")) {
 		const struct value *app = v_map_get(a, "app"), *file = v_map_get(a, "file");
 		const struct app *ap = app ? apps_resolve(&h->apps, app->u.s.p) : NULL;
-		launch(h, ap ? ap->id : app->u.s.p, "new", file ? file->u.s.p : NULL);
+		if (!ap) { /* not installed: the scene greys the button; nothing to start */
+			fprintf(stderr, "glassine-home: %s isn't installed\n", app ? app->u.s.p : "(no app)");
+			return;
+		}
+		launch(h, ap->id, "new", file ? file->u.s.p : NULL);
 	} else if (!strcmp(k->u.s.p, "settings")) {
 		const struct value *pg = v_map_get(a, "page");
 		launch(h, "glassine-settings", "new", pg ? pg->u.s.p : NULL);
