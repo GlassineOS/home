@@ -178,6 +178,9 @@ Device-neutral (grid and sizes follow the screen's logical size). No device risk
 - Host: places: the default, a set folder, an unset or missing one, an unknown name, a place that is a link or
   points into system areas (refused); Continue reading with a library outside `~/Books`.
 - Host: renders of every `home.*` board state in three voices and both orientations.
+- Host: in a headless sway, Home floating as the session shows it follows every size it is given (portrait and
+  landscape, smaller and larger, and a size given while it is hidden, once shown): the buffer it commits is the
+  window's size and its paper reaches the window's far corner.
 - Host: Arrange by taps and keys: swap (only where offered), page swap, size, remove (All apps included), Add
   widget (built in, from an app, the user's own), widget settings; the layout file after each, one commit per
   action, damage only where the screen changed.

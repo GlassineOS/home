@@ -37,6 +37,8 @@ out/glassine-home          # the screen, in a Wayland session
 `out/renders/home.<board>-<voice>-<orientation>.png` are the design's `home.*` boards (screen,
 page-2, page-3, images, edit, edit-focus, app-menu, widget-settings, add-widget) in the three
 voices, portrait and landscape, drawn offscreen from the fixtures in `test/screen/`.
+`test/resize.sh` (in `make check` when `sway` and `grim` are installed, else skipped) runs Home in a
+headless sway and checks that it follows every size its floating window is given.
 
 ### How the screen behaves
 
