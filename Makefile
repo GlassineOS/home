@@ -96,7 +96,7 @@ $(O):
 
 # test_home renders every Home board into out/renders (see test/test_home.c)
 check: $(TESTS:%=$(O)/test_%) $(O)/test_home all
-	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh; sh test/resize.sh
+	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh; sh test/resize.sh; sh test/seat-caps.sh
 	@FONTCONFIG_FILE=$$(sh test/fonts.sh) ./$(O)/test_home
 
 install: all
