@@ -20,7 +20,7 @@ jobs:
             apk add -q build-base lua5.4-dev pkgconf linux-headers git curl \
               cairo-dev pango-dev librsvg-dev glib-dev gdk-pixbuf-dev python3 py3-gobject3 py3-cairo gtk+3.0 \
               font-dejavu font-eb-garamond adwaita-icon-theme wayland-dev wayland-protocols libxkbcommon-dev \
-              sway grim
+              sway grim wlrctl
             make check'
       - uses: actions/upload-artifact@v4
         if: always()
