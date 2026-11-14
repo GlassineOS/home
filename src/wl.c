@@ -356,19 +356,51 @@ static void k_mods(void *d, struct wl_keyboard *k, uint32_t s, uint32_t dep, uin
 static void k_repeat(void *d, struct wl_keyboard *k, int32_t rate, int32_t delay) {}
 static const struct wl_keyboard_listener kbd_listener = { k_keymap, k_enter, k_leave, k_key, k_mods, k_repeat };
 
+/* A device the seat loses (the touchscreen across a suspend, a Bluetooth
+ * keyboard) leaves its object inert: the compositor sends it nothing again,
+ * even when the device comes back. So a lost capability releases the object
+ * (and ends a touch or press in progress), and a capability that comes back
+ * gets a new one. */
 static void seat_caps(void *d, struct wl_seat *seat, uint32_t caps)
 {
+	bool rel = wl_seat_get_version(seat) >= WL_POINTER_RELEASE_SINCE_VERSION;
+
 	if ((caps & WL_SEAT_CAPABILITY_POINTER) && !W.ptr) {
 		W.ptr = wl_seat_get_pointer(seat);
 		wl_pointer_add_listener(W.ptr, &ptr_listener, NULL);
+	} else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && W.ptr) {
+		if (W.h)
+			home_cancel(W.h);
+		if (rel)
+			wl_pointer_release(W.ptr);
+		else
+			wl_pointer_destroy(W.ptr);
+		W.ptr = NULL;
 	}
 	if ((caps & WL_SEAT_CAPABILITY_TOUCH) && !W.touch) {
 		W.touch = wl_seat_get_touch(seat);
 		wl_touch_add_listener(W.touch, &touch_listener, NULL);
+	} else if (!(caps & WL_SEAT_CAPABILITY_TOUCH) && W.touch) {
+		if (W.touch_id >= 0) {
+			W.touch_id = -1;
+			if (W.h)
+				home_cancel(W.h);
+		}
+		if (rel)
+			wl_touch_release(W.touch);
+		else
+			wl_touch_destroy(W.touch);
+		W.touch = NULL;
 	}
 	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !W.kbd) {
 		W.kbd = wl_seat_get_keyboard(seat);
 		wl_keyboard_add_listener(W.kbd, &kbd_listener, NULL);
+	} else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && W.kbd) {
+		if (rel)
+			wl_keyboard_release(W.kbd);
+		else
+			wl_keyboard_destroy(W.kbd);
+		W.kbd = NULL;
 	}
 }
 static void seat_name(void *d, struct wl_seat *s, const char *n) {}
