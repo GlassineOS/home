@@ -39,6 +39,9 @@ page-2, page-3, images, edit, edit-focus, app-menu, widget-settings, add-widget)
 voices, portrait and landscape, drawn offscreen from the fixtures in `test/screen/`.
 `test/resize.sh` (in `make check` when `sway` and `grim` are installed, else skipped) runs Home in a
 headless sway and checks that it follows every size its floating window is given.
+`test/content.sh` (in `make check` when `sway-glassine` and the wlr-protocols XML are installed, else
+skipped) taps Home in a headless sway-glassine and checks that each tap's paint is said to be a page,
+on the first commit after the tap.
 
 ### How the screen behaves
 
@@ -46,7 +49,10 @@ headless sway and checks that it follows every size its floating window is given
   "Open on this screen": here). A widget's file or a Settings page goes as a third word; the shell
   doesn't take it yet. Hides itself only with `glassine-swayd home hide` (Escape). Both commands
   can be replaced through the environment (`src/cli/home.c` lists it).
-- One surface, one commit per paint; nothing animates. Input paints at once; widget output,
+- One surface, one commit per paint; nothing animates. The commit that brings a tap's answer is
+  said to be a page (the ink protocol's `set_content`, version 4, where the compositor offers it;
+  the rule is GlassineOS/ui's `UiContent`), so an e-ink panel shows it at once in one exact refresh;
+  other commits say nothing. `GLASSINE_HOME_CONTENT=off`: nothing is said. Input paints at once; widget output,
   images and the clock wait until a second has passed since the last such paint. A paint that
   changes nothing commits nothing; a changed card damages only its rectangle, an image filling in
   only its slot.
