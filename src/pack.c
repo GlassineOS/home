@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_LANES 2
-#define MAX_ROWS 5
+#define MAX_LANES PACK_MAX_LANES
+#define MAX_ROWS PACK_MAX_ROWS
 #define COLS 4
 
 struct grid pack_grid(enum orient o)
@@ -25,10 +25,27 @@ struct page {
 	unsigned char used[MAX_LANES][MAX_ROWS];
 };
 
-int pack(enum orient o, const int *sizes, size_t n, struct pack_pos *out)
+struct grid pack_grid_fit(enum orient o, int lanes, int rows)
 {
 	struct grid g = pack_grid(o);
+	if (lanes > g.lanes)
+		g.lanes = lanes > MAX_LANES ? MAX_LANES : lanes;
+	if (rows > g.rows)
+		g.rows = rows > MAX_ROWS ? MAX_ROWS : rows;
+	return g;
+}
+
+int pack(struct grid g, const int *sizes, size_t n, struct pack_pos *out)
+{
 	struct page pg;
+	if (g.lanes < 1)
+		g.lanes = 1;
+	if (g.lanes > MAX_LANES)
+		g.lanes = MAX_LANES;
+	if (g.rows < 1)
+		g.rows = 1;
+	if (g.rows > MAX_ROWS)
+		g.rows = MAX_ROWS;
 	memset(&pg, 0, sizeof pg);
 	int page = 0, lane = 0, row = 0; /* the flow position */
 	bool any = false;
@@ -109,7 +126,7 @@ void pack_page_range(const struct pack_pos *pos, size_t n, int page, size_t *fir
 	*count = c;
 }
 
-bool pack_can_swap(enum orient o, const int *sizes, size_t n, size_t i, size_t j)
+bool pack_can_swap(struct grid g, const int *sizes, size_t n, size_t i, size_t j)
 {
 	if (i >= n || j >= n || i == j)
 		return false;
@@ -118,11 +135,11 @@ bool pack_can_swap(enum orient o, const int *sizes, size_t n, size_t i, size_t j
 	bool ok = false;
 	if (a && b && s) {
 		memcpy(s, sizes, n * sizeof *s);
-		pack(o, s, n, a);
+		pack(g, s, n, a);
 		int t = s[i];
 		s[i] = s[j];
 		s[j] = t;
-		pack(o, s, n, b);
+		pack(g, s, n, b);
 		ok = true;
 		/* after the swap, slot i holds the widget that was at j and vice versa */
 		for (size_t k = 0; k < n; k++)
@@ -135,12 +152,12 @@ bool pack_can_swap(enum orient o, const int *sizes, size_t n, size_t i, size_t j
 	return ok;
 }
 
-bool pack_swap_pages(enum orient o, const int *sizes, size_t n, int a, int b, size_t *order)
+bool pack_swap_pages(struct grid g, const int *sizes, size_t n, int a, int b, size_t *order)
 {
 	struct pack_pos *pos = malloc((n ? n : 1) * sizeof *pos);
 	if (!pos)
 		return false;
-	int pages = pack(o, sizes, n, pos);
+	int pages = pack(g, sizes, n, pos);
 	if (a < 0 || b < 0 || a >= pages || b >= pages) {
 		free(pos);
 		return false;
