@@ -10,6 +10,11 @@
  * since it was last used) and committed together. With both buffers still with the
  * compositor, the paint is owed (frames.c) and committed from the main loop once one
  * is released: commit never dispatches events, so no handler runs in a paint.
+ *
+ * A commit that answers a tap is said to be a page (the ink protocol's set_content,
+ * where the compositor has it), so an e-ink panel shows it at once in one exact
+ * refresh; the rule is GlassineOS/ui's (UiContent). What widgets repaint by themselves
+ * says nothing. GLASSINE_HOME_CONTENT=off: nothing is said.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -30,6 +35,7 @@
 #include "fractional-scale-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
+#include "glassine-ink-v1-client-protocol.h"
 
 struct buffer {
 	struct wl_buffer *b;
@@ -62,6 +68,12 @@ static struct {
 	struct wp_viewport *vp;
 	uint32_t frac;
 	struct wl_surface *surf;
+	struct glassine_ink_manager_v1 *inkman;
+	struct glassine_ink_surface_v1 *inks;
+	uint32_t ink_ver;
+	UiContent said;          /* what the next commit is */
+	bool tap;                /* a tap changed something: the next paint answers it */
+	unsigned paints;         /* paints of the core, counted to see whether that paint came */
 	struct xdg_surface *xs;
 	struct xdg_toplevel *top;
 	struct wl_pointer *ptr;
@@ -165,6 +177,9 @@ static void present(void)
 	for (int k = 0; k < nsd; k++)
 		wl_surface_damage_buffer(W.surf, (int)sd[k].x, (int)sd[k].y, (int)ceil(sd[k].w), (int)ceil(sd[k].h));
 	frames_shown(&W.f, i);
+	int said = ui_content_frame(&W.said, 1);
+	if (said != UI_CONTENT_NONE && W.inks)
+		glassine_ink_surface_v1_set_content(W.inks, (uint32_t)said);
 	wl_surface_commit(W.surf);
 }
 
@@ -172,6 +187,7 @@ static void commit(void *ud, const struct rect *r, int n)
 {
 	if (!W.configured || !W.h->cur)
 		return;
+	W.paints++;
 	frames_damage(&W.f, r, n);
 	present();
 }
@@ -291,6 +307,15 @@ static double lx(double v)
 	return v;
 }
 
+/* The finger or the button lifts: a tap. The core marks what it changed for the next
+ * paint (home_tick, from the main loop): that paint's commit is the tap's answer, a page. */
+static void release(void)
+{
+	home_release(W.h, W.px, W.py);
+	if (W.h->dirty_now)
+		W.tap = true;
+}
+
 static void p_enter(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *sf, wl_fixed_t x, wl_fixed_t y)
 {
 	W.px = lx(wl_fixed_to_double(x));
@@ -312,7 +337,7 @@ static void p_button(void *d, struct wl_pointer *p, uint32_t s, uint32_t t, uint
 	if (st == WL_POINTER_BUTTON_STATE_PRESSED)
 		home_press(W.h, W.px, W.py);
 	else
-		home_release(W.h, W.px, W.py);
+		release();
 }
 static void p_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v) {}
 static void p_frame(void *d, struct wl_pointer *p) {}
@@ -340,7 +365,7 @@ static void t_up(void *d, struct wl_touch *t, uint32_t s, uint32_t tm, int32_t i
 	if (id != W.touch_id)
 		return;
 	W.touch_id = -1;
-	home_release(W.h, W.px, W.py);
+	release();
 }
 static void t_motion(void *d, struct wl_touch *t, uint32_t tm, int32_t id, wl_fixed_t x, wl_fixed_t y)
 {
@@ -545,6 +570,13 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name, const char
 	} else if (!strcmp(iface, wl_seat_interface.name) && !W.seat) {
 		W.seat = wl_registry_bind(r, name, &wl_seat_interface, ver < 5 ? ver : 5);
 		wl_seat_add_listener(W.seat, &seat_listener, NULL);
+	} else if (!strcmp(iface, glassine_ink_manager_v1_interface.name) && ver >= GLASSINE_INK_SURFACE_V1_SET_CONTENT_SINCE_VERSION &&
+		   !W.inkman) {
+		const char *e = getenv("GLASSINE_HOME_CONTENT");
+		if (!e || strcmp(e, "off")) {
+			W.ink_ver = GLASSINE_INK_SURFACE_V1_SET_CONTENT_SINCE_VERSION;
+			W.inkman = wl_registry_bind(r, name, &glassine_ink_manager_v1_interface, W.ink_ver);
+		}
 	} else if (!strcmp(iface, wl_output_interface.name) && W.nouts < MAX_OUTS) {
 		struct out *u = &W.outs[W.nouts++];
 		memset(u, 0, sizeof *u);
@@ -612,6 +644,8 @@ int home_wayland_main(struct zygote *z)
 		wp_fractional_scale_v1_add_listener(wp_fractional_scale_manager_v1_get_fractional_scale(W.fsman, W.surf),
 						    &fs_listener, NULL);
 	}
+	if (W.inkman) /* (an ink object without areas changes nothing about the pen's ink) */
+		W.inks = glassine_ink_manager_v1_get_ink_surface(W.inkman, W.surf);
 	W.xs = xdg_wm_base_get_xdg_surface(W.wm, W.surf);
 	xdg_surface_add_listener(W.xs, &xs_listener, NULL);
 	W.top = xdg_surface_get_toplevel(W.xs);
@@ -627,7 +661,15 @@ int home_wayland_main(struct zygote *z)
 
 	int status = 0;
 	while (W.running) {
+		/* a tap's paint is a page (with both buffers busy, the owed commit that brings it);
+		 * a tick that paints nothing for it drops it, so no later commit carries it */
+		if (W.tap)
+			ui_content_page(&W.said);
+		unsigned paints = W.paints;
 		int wait = home_tick(&h);
+		if (W.tap && W.paints == paints)
+			ui_content_frame(&W.said, 0);
+		W.tap = false;
 		wl_display_flush(W.d);
 		struct pollfd p[8];
 		int fds[6], nf = home_fds(&h, fds, 6);
