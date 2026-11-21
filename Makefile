@@ -77,11 +77,17 @@ $(O)/proto/xdg-shell-client-protocol.h $(O)/proto/xdg-shell-protocol.c: | $(O)
 	wayland-scanner client-header $(WL_PROTO)/stable/xdg-shell/xdg-shell.xml $(O)/proto/xdg-shell-client-protocol.h
 	wayland-scanner private-code $(WL_PROTO)/stable/xdg-shell/xdg-shell.xml $(O)/proto/xdg-shell-protocol.c
 
-$(O)/wl.o: src/wl.c src/*.h $(O)/proto/xdg-shell-client-protocol.h $(UI_DEP) | $(O)
+# ... and the ink protocol (protocols/, a copy of GlassineOS/protocols'): what a commit is
+$(O)/proto/glassine-ink-v1-client-protocol.h $(O)/proto/glassine-ink-v1-protocol.c: protocols/glassine-ink-v1.xml | $(O)
+	mkdir -p $(O)/proto
+	wayland-scanner client-header protocols/glassine-ink-v1.xml $(O)/proto/glassine-ink-v1-client-protocol.h
+	wayland-scanner private-code protocols/glassine-ink-v1.xml $(O)/proto/glassine-ink-v1-protocol.c
+
+$(O)/wl.o: src/wl.c src/*.h $(O)/proto/xdg-shell-client-protocol.h $(O)/proto/glassine-ink-v1-client-protocol.h $(UI_DEP) | $(O)
 	$(CC) $(CFLAGS) $(LUA_CFLAGS) $(SCREEN_CFLAGS) -I$(O)/proto $(shell $(PKG_CONFIG) --cflags $(WL_PKGS)) -c -o $@ $<
 
-$(O)/glassine-home: src/cli/home.c $(O)/wl.o $(O)/proto/xdg-shell-protocol.c $(SCREEN_OBJ) $(CORE_OBJ) $(SANDBOX_OBJ) | $(O)
-	$(CC) $(CFLAGS) -I$(O)/proto -o $@ src/cli/home.c $(O)/wl.o $(O)/proto/xdg-shell-protocol.c $(SCREEN_OBJ) \
+$(O)/glassine-home: src/cli/home.c $(O)/wl.o $(O)/proto/xdg-shell-protocol.c $(O)/proto/glassine-ink-v1-protocol.c $(SCREEN_OBJ) $(CORE_OBJ) $(SANDBOX_OBJ) | $(O)
+	$(CC) $(CFLAGS) -I$(O)/proto -o $@ src/cli/home.c $(O)/wl.o $(O)/proto/xdg-shell-protocol.c $(O)/proto/glassine-ink-v1-protocol.c $(SCREEN_OBJ) \
 	    $(CORE_OBJ) $(SANDBOX_OBJ) $(SCREEN_LIBS) $(shell $(PKG_CONFIG) --libs $(WL_PKGS)) $(LUA_LIBS) $(LDLIBS) $(UI_RPATH)
 
 $(O)/test_home: test/test_home.c $(SCREEN_OBJ) $(CORE_OBJ) $(SANDBOX_OBJ) test/t.h | $(O)
@@ -96,7 +102,7 @@ $(O):
 
 # test_home renders every Home board into out/renders (see test/test_home.c)
 check: $(TESTS:%=$(O)/test_%) $(O)/test_home all
-	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh; sh test/resize.sh; sh test/seat-caps.sh
+	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh; sh test/resize.sh; sh test/seat-caps.sh; sh test/content.sh
 	@FONTCONFIG_FILE=$$(sh test/fonts.sh) ./$(O)/test_home
 
 install: all
