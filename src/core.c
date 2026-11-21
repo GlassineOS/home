@@ -79,6 +79,72 @@ static void load_voice(struct home *h)
 	h->v = ui_voice_find(name);
 }
 
+/* ---- the text size and the size of a design px on the glass ------------------------ */
+
+static void load_text(struct home *h)
+{
+	double t = ui_text_size_read(h->fw_text.path[0] ? h->fw_text.path : NULL) / 100.0;
+	if (t != h->text) {
+		h->text = t;
+		h->dirty_bg = true;
+	}
+}
+
+/*
+ * The density of the output Home is on: its line in the session's output-scale file, found
+ * by its key (Wayland tells no serial: a key that ends in "Unknown" matches a line of the
+ * same make and model), by its connector's name, else the line of Home's factor or the
+ * only line; with none of these, the size the output reports. The millimetres of a design
+ * px are Home's factor over it (0: unknown, no minimums).
+ */
+static bool key_matches(const char *line, const char *key)
+{
+	if (!*key)
+		return false;
+	if (!strcmp(line, key))
+		return true;
+	size_t k = strlen(key), u = strlen(" Unknown");
+	return k > u && !strcmp(key + k - u, " Unknown") && !strncmp(line, key, k - u + 1);
+}
+
+static void load_density(struct home *h)
+{
+	UiOutputScale o[16];
+	int n = ui_output_scale_read(h->fw_scale.path[0] ? h->fw_scale.path : NULL, o, 16), at = -1;
+	if (n > 16)
+		n = 16;
+	for (int i = 0; i < n && at < 0; i++)
+		if (key_matches(o[i].key, h->out_key) || (h->out_name[0] && !strcmp(o[i].key, h->out_name)))
+			at = i;
+	if (at < 0 && !(h->out_density > 0)) {
+		for (int i = 0; i < n && at < 0; i++)
+			if (fabs(o[i].factor - h->S) < 0.005)
+				at = i;
+		if (at < 0 && n == 1)
+			at = 0;
+	}
+	double d = at >= 0 ? o[at].density : h->out_density;
+	double mm = d > 0 ? ui_mm_per_px(h->S, d) : 0;
+	if (mm != h->mm_per_px) {
+		h->mm_per_px = mm;
+		h->dirty_bg = true;
+	}
+}
+
+void home_output(struct home *h, const char *key, const char *name, double density)
+{
+	snprintf(h->out_key, sizeof h->out_key, "%s", key ? key : "");
+	snprintf(h->out_name, sizeof h->out_name, "%s", name ? name : "");
+	h->out_density = density;
+	load_density(h);
+}
+
+double home_touch_min(const struct home *h)
+{
+	double m = h->mm_per_px > 0 ? UI_TAP_MM / h->mm_per_px : 0;
+	return m > TOUCH_MIN ? m : TOUCH_MIN;
+}
+
 static void load_dither(struct home *h)
 {
 	h->dither = true;
@@ -435,7 +501,49 @@ static bool static_wd(const struct home *h, int wd)
 	for (int i = 0; i < 3; i++)
 		if (h->wd_cat[i] == wd)
 			return true;
-	return wd == h->wd_shellconf || wd == h->wd_eink || wd == h->wd_conf;
+	return wd == h->wd_shellconf || wd == h->wd_eink || wd == h->wd_conf || wd == h->fw_text.wd || wd == h->fw_scale.wd;
+}
+
+/* Watches f's folder, or the nearest folder above it that exists (to see the folder made). */
+static void fwatch_arm(struct home *h, struct fwatch *f)
+{
+	f->wd = -1;
+	if (!f->path[0])
+		return;
+	snprintf(f->dir, sizeof f->dir, "%s", f->path);
+	for (;;) {
+		char *sl = strrchr(f->dir, '/');
+		if (!sl)
+			return;
+		if (sl == f->dir)
+			sl[1] = 0;
+		else
+			*sl = 0;
+		f->wd = watch_dir(h, f->dir, INO_DATA);
+		if (f->wd >= 0 || !f->dir[1])
+			return;
+	}
+}
+
+/* An event of f's watch: true when the file may have changed (it, or a folder on the way to it). */
+static bool fwatch_event(struct home *h, struct fwatch *f, int wd, uint32_t mask, const char *name)
+{
+	if (wd != f->wd || wd < 0)
+		return false;
+	size_t dl = strlen(f->dir);
+	const char *rest = f->path + dl + (f->dir[1] ? 1 : 0); /* the path below the watched folder */
+	if (mask & IN_IGNORED) {
+		fwatch_arm(h, f);
+		return true;
+	}
+	if (!name)
+		return false;
+	if (!strchr(rest, '/'))
+		return !strcmp(name, rest);
+	if (strncmp(rest, name, strlen(name)) || rest[strlen(name)] != '/')
+		return false;
+	fwatch_arm(h, f); /* a folder on the way appeared or went */
+	return true;
 }
 
 /* Watches the parent directories of every file a card's last run read. */
@@ -501,6 +609,8 @@ static void watch_static(struct home *h)
 		*sl = 0;
 	h->wd_eink = watch_dir(h, e, INO_DATA);
 	watch_conf(h);
+	fwatch_arm(h, &h->fw_text);
+	fwatch_arm(h, &h->fw_scale);
 }
 
 /* ---- setup ---------------------------------------------------------------------- */
@@ -522,6 +632,13 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 	h->sheet_card = -1;
 	h->run_card = -1;
 	h->wd_conf = h->wd_shellconf = h->wd_eink = -1;
+	h->fw_text.wd = h->fw_scale.wd = -1;
+	h->text = 1;
+	h->S = 1;
+	if (!ui_text_size_file(h->fw_text.path, sizeof h->fw_text.path))
+		h->fw_text.path[0] = 0;
+	if (!ui_output_scale_file(h->fw_scale.path, sizeof h->fw_scale.path))
+		h->fw_scale.path[0] = 0;
 	for (int i = 0; i < 16; i++)
 		h->wd_apps[i] = -1;
 	for (int i = 0; i < 3; i++)
@@ -543,6 +660,8 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 		fprintf(stderr, "glassine-home: App category's settings: %s\n", err);
 	load_voice(h);
 	load_dither(h);
+	load_text(h);
+	load_density(h);
 	apps_load(&h->apps);
 	catalog_scan(&h->cat, h->builtin_root, h->system_root, getenv("GLASSINE_HOME_USER_WIDGETS"));
 
@@ -566,9 +685,12 @@ bool home_init(struct home *h, struct zygote *z, const struct home_io *io)
 	cards_sync(h);
 	h->iq = imgq_start();
 	watch_static(h);
-	h->W = 702;
-	h->H = 884;
+	/* until the first configure says how large the window is: the design's portrait screen */
+	h->W = h->dw = 702;
+	h->H = h->dh = 884;
 	h->S = 1;
+	h->orient = ORIENT_PORTRAIT;
+	h->grid = scene_grid(h->W, h->H);
 	return true;
 }
 
@@ -600,14 +722,24 @@ void home_free(struct home *h)
 		cairo_surface_destroy(h->cur);
 }
 
-void home_resize(struct home *h, int W, int H, int S)
+static void resize(struct home *h, int W, int H, int dw, int dh, double S)
 {
-	if (W == h->W && H == h->H && S == h->S && h->cur)
+	if (W < 1)
+		W = 1;
+	if (H < 1)
+		H = 1;
+	if (W == h->W && H == h->H && dw == h->dw && dh == h->dh && S == h->S && h->cur)
 		return;
 	h->W = W;
 	h->H = H;
-	h->S = S < 1 ? 1 : S;
+	h->dw = dw < 1 ? 1 : dw;
+	h->dh = dh < 1 ? 1 : dh;
+	if (S != h->S) {
+		h->S = S;
+		load_density(h); /* the millimetres of a design px follow the factor */
+	}
 	h->orient = W > H ? ORIENT_LANDSCAPE : ORIENT_PORTRAIT;
+	h->grid = scene_grid(W, H);
 	if (h->cur)
 		cairo_surface_destroy(h->cur);
 	h->cur = NULL; /* the next paint damages everything */
@@ -616,6 +748,20 @@ void home_resize(struct home *h, int W, int H, int S)
 		for (int k = 0; k < DESC_MAX_IMAGES; k++)
 			img_clear(&h->cards[i].img[k]); /* slot sizes may follow the card */
 	h->dirty_now = true;
+}
+
+void home_resize(struct home *h, int W, int H, double S)
+{
+	if (!(S > 0))
+		S = 1;
+	resize(h, W, H, ui_device_px(W, S), ui_device_px(H, S), S);
+}
+
+void home_resize_px(struct home *h, int dw, int dh, double S)
+{
+	if (!(S > 0))
+		S = 1;
+	resize(h, (int)lround(dw / S), (int)lround(dh / S), dw, dh, S);
 }
 
 void home_appear(struct home *h)
@@ -780,7 +926,7 @@ static int page_of(const struct home *h, size_t idx)
 	struct pack_pos *pos = calloc(h->conf.n + 1, sizeof *pos);
 	int p = 0;
 	if (s && pos) {
-		pack(h->orient, s, h->conf.n, pos);
+		pack(h->grid, s, h->conf.n, pos);
 		p = idx < h->conf.n ? pos[idx].page : 0;
 	}
 	free(s);
@@ -792,7 +938,7 @@ static int npages(const struct home *h)
 {
 	int *s = sizes_of(h);
 	struct pack_pos *pos = calloc(h->conf.n + 1, sizeof *pos);
-	int n = s && pos ? pack(h->orient, s, h->conf.n, pos) : 0;
+	int n = s && pos ? pack(h->grid, s, h->conf.n, pos) : 0;
 	free(s);
 	free(pos);
 	return n;
@@ -807,7 +953,7 @@ static void clamp_page(struct home *h)
 		struct pack_pos *pos = calloc(h->conf.n + 2, sizeof *pos);
 		if (s && pos) {
 			s[h->conf.n] = SIZE_HALF;
-			n = pack(h->orient, s, h->conf.n + 1, pos);
+			n = pack(h->grid, s, h->conf.n + 1, pos);
 		}
 		free(s);
 		free(pos);
@@ -983,7 +1129,7 @@ static void cycle_size(struct home *h, int ci)
 	struct card *c = &h->cards[ci];
 	if (c->nat != NAT_NONE) {
 		static const int rows[] = { 1, 2, 3, 5 };
-		int n = h->orient == ORIENT_LANDSCAPE ? 3 : 4, k = 0;
+		int n = h->grid.rows < 5 ? 3 : 4, k = 0; /* 5 rows only where the grid has them */
 		for (int i = 0; i < 4; i++)
 			if (rows[i] == in->size)
 				k = i;
@@ -1084,7 +1230,7 @@ static void activate(struct home *h, const struct hit *t)
 	case A_PAGE_SWAP: {
 		int *s = sizes_of(h);
 		size_t *order = malloc((h->conf.n + 1) * sizeof *order);
-		if (s && order && pack_swap_pages(h->orient, s, h->conf.n, t->a, t->b, order)) {
+		if (s && order && pack_swap_pages(h->grid, s, h->conf.n, t->a, t->b, order)) {
 			conf_reorder(&h->conf, order);
 			save_conf(h);
 			cards_sync(h);
@@ -1186,7 +1332,8 @@ static int hit_at(const struct home *h, double x, double y)
 	double best_d = 0;
 	for (int i = h->nhits - 1; i > barrier; i--) {
 		const struct rect *r = &h->hits[i].r;
-		double gw = r->w < TOUCH_MIN ? (TOUCH_MIN - r->w) / 2 : 0, gh = r->h < TOUCH_MIN ? (TOUCH_MIN - r->h) / 2 : 0;
+		double tm = home_touch_min(h);
+		double gw = r->w < tm ? (tm - r->w) / 2 : 0, gh = r->h < tm ? (tm - r->h) / 2 : 0;
 		struct rect t = { r->x - gw, r->y - gh, r->w + 2 * gw, r->h + 2 * gh };
 		double d = rect_dist(r, x, y);
 		if (in_rect(&t, x, y) && (best < 0 || d < best_d)) {
@@ -1338,7 +1485,7 @@ void home_paint(struct home *h, bool bg)
 	if (bg)
 		h->dirty_bg = false;
 	clamp_page(h);
-	int dw = h->W * h->S, dh = h->H * h->S;
+	int dw = h->dw, dh = h->dh;
 	cairo_surface_t *next = cairo_image_surface_create(CAIRO_FORMAT_RGB24, dw, dh);
 	cairo_t *cr = cairo_create(next);
 	cairo_scale(cr, h->S, h->S);
@@ -1425,6 +1572,11 @@ int home_fds(struct home *h, int *fds, int max)
 static void inotify_event(struct home *h, int wd, uint32_t mask, const char *name)
 {
 	long long now = mono_ms();
+	/* these share their folders' watches with what follows, so they don't end the event */
+	if (fwatch_event(h, &h->fw_text, wd, mask, name))
+		load_text(h);
+	if (fwatch_event(h, &h->fw_scale, wd, mask, name))
+		load_density(h);
 	if (wd == h->wd_conf && wd >= 0 && (mask & IN_IGNORED)) {
 		/* the config folder was removed: its watch is gone; the next write makes the folder and watches it again */
 		h->wd_conf = -1;

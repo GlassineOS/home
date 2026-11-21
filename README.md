@@ -38,7 +38,10 @@ out/glassine-home          # the screen, in a Wayland session
 page-2, page-3, images, edit, edit-focus, app-menu, widget-settings, add-widget) in the three
 voices, portrait and landscape, drawn offscreen from the fixtures in `test/screen/`.
 `test/resize.sh` (in `make check` when `sway` and `grim` are installed, else skipped) runs Home in a
-headless sway and checks that it follows every size its floating window is given.
+headless sway and checks that it follows every size its floating window is given; `test/scale.sh`
+(with `sway`) that it commits at the output's fractional or whole scale, also when the scale changes
+and on a second output. `home.size-STEP-*` renders Home at each interface size on a 1404 × 1872 px,
+157 × 209 mm panel, `home.text-150-*` at a text size of 150 %.
 
 ### How the screen behaves
 
@@ -46,6 +49,13 @@ headless sway and checks that it follows every size its floating window is given
   "Open on this screen": here). A widget's file or a Settings page goes as a third word; the shell
   doesn't take it yet. Hides itself only with `glassine-swayd home hide` (Escape). Both commands
   can be replaced through the environment (`src/cli/home.c` lists it).
+- The size of the interface (GlassineOS/shell spec 012): a design px is a logical px, so the window
+  is its configured size in design px, drawn at the factor the compositor gives the surface
+  (`wp_fractional_scale_v1` with `wp_viewporter`, else the output's whole scale). The grid fills the
+  window: more rows and lanes in a larger one, the design's at its own size. Text follows
+  `~/.config/glassine/text-size`; the minimums (7 mm tap targets, 2.0/2.8 mm text) use the density of
+  the output Home is on, from the session's `$XDG_RUNTIME_DIR/glassine/output-scale` or the size the
+  output reports. Both files are watched.
 - One surface, one commit per paint; nothing animates. Input paints at once; widget output,
   images and the clock wait until a second has passed since the last such paint. A paint that
   changes nothing commits nothing; a changed card damages only its rectangle, an image filling in
