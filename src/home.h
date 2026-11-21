@@ -40,7 +40,9 @@
 #define MAX_HITS 512
 #define MAX_REGIONS 128
 #define MAX_DAMAGE 64
-#define TOUCH_MIN 48 /* FR-041: a press counts this far around a smaller control (hit_at) */
+/* FR-041: a press counts this far around a smaller control (hit_at), in design px; and never
+ * less than the smallest tap target in millimetres (ui_min_tap, home_touch_min) */
+#define TOUCH_MIN 48
 #define IMAGE_MAX_BYTES (20 * 1024 * 1024)
 /* sources over this many pixels aren't decoded (dashed frame): memory follows the pixels, not the bytes */
 #define IMAGE_MAX_SOURCE_PX (40LL * 1000 * 1000)
@@ -120,10 +122,30 @@ struct home_io {
 	void *ud;
 };
 
+/* A file Home reads again when it changes: its folder is watched, or, while that is missing, the nearest one above it. */
+struct fwatch { char path[1024]; char dir[1024]; int wd; };
+
 struct home {
-	/* size: logical (design) px and device px per logical px */
-	int W, H, S;
+	/*
+	 * size: the window in design px (its logical size: the compositor's scale is the
+	 * factor), the canvas in device px, and the factor, device px per design px (whole
+	 * or not). The grid follows the size: more rows and lanes in a larger window.
+	 */
+	int W, H;
+	int dw, dh;
+	double S;
 	enum orient orient;
+	struct grid grid;
+	/*
+	 * The text size (1.0 to 1.5, ~/.config/glassine/text-size) and the millimetres of
+	 * a design px on the glass (0: unknown, no minimum sizes): the factor over the
+	 * density of the output Home is on, from the session's output-scale file, else
+	 * from the size the output reports.
+	 */
+	double text, mm_per_px;
+	char out_key[256], out_name[64]; /* the output Home is on: its key and its connector */
+	double out_density;              /* from the size it reports; 0: none or not plausible */
+	struct fwatch fw_text, fw_scale;
 	const UiVoice *v;
 	char voice_name[32];
 	bool voice_fixed;              /* GLASSINE_HOME_VOICE */
@@ -195,7 +217,21 @@ struct home {
 /* Sets up everything but the zygote (started by main before any thread). */
 bool home_init(struct home *h, struct zygote *z, const struct home_io *io);
 void home_free(struct home *h);
-void home_resize(struct home *h, int W, int H, int S);
+/*
+ * The window is W x H design px at S device px per design px; the canvas is that in
+ * device px, rounded (ui_device_px), as a surface's buffer is at a fractional scale.
+ */
+void home_resize(struct home *h, int W, int H, double S);
+/* The same for a canvas of a given size in device px: the window is that over S, rounded. */
+void home_resize_px(struct home *h, int dw, int dh, double S);
+/*
+ * The output Home is on: its key (the session's, as in the output-scale file; NULL or
+ * "": unknown), its connector name, and its density from the size it reports (px per
+ * mm; 0: none). Sets the millimetres of a design px, and paints if they changed.
+ */
+void home_output(struct home *h, const char *key, const char *name, double density);
+/* The touch area's least size in design px: TOUCH_MIN, or the smallest tap target if that is more. */
+double home_touch_min(const struct home *h);
 /* Home appears: run every widget once. */
 void home_appear(struct home *h);
 
@@ -224,6 +260,8 @@ void home_paint(struct home *h, bool background_too);
 /* scene.c */
 void scene_paint(struct home *h, cairo_t *cr);
 void scene_layout_page(struct home *h, struct rect *grid);
+/* The grid of a W x H window: the design's, and more rows and lanes where they fit. */
+struct grid scene_grid(int W, int H);
 bool home_layout_pages(struct home *h, struct pack_pos *pos, int *npages_with_add, struct pack_pos *add);
 const char *card_name(const struct home *h, const struct card *c, char *buf, size_t len);
 bool card_has_settings(const struct home *h, const struct card *c);
@@ -266,7 +304,7 @@ struct imgq *imgq_start(void);
 void imgq_stop(struct imgq *q);
 int imgq_fd(struct imgq *q);
 /* Requests slot i of card c (source, slot size in device px); fills c->img[i] when ready. */
-void img_request(struct home *h, struct card *c, int i, const struct value *item, int lw, int lh);
+void img_request(struct home *h, struct card *c, int i, const struct value *item, int w, int hh);
 /* Collects finished images; returns true when one arrived. */
 bool imgq_collect(struct home *h);
 void img_clear(struct img *im);
