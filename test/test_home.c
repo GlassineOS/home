@@ -555,7 +555,7 @@ static void check_swaps_offered(struct home *h)
 	struct pack_pos *pos = calloc(n + 1, sizeof *pos);
 	for (size_t i = 0; i < n; i++)
 		sizes[i] = h->conf.w[i].size;
-	pack(h->orient, sizes, n, pos);
+	pack(h->grid, sizes, n, pos);
 	int want = 0;
 	for (size_t a = 0; a < n; a++)
 		for (size_t b = 0; b < n; b++) {
@@ -566,7 +566,7 @@ static void check_swaps_offered(struct home *h)
 			int oy0 = ay0 > by0 ? ay0 : by0, oy1 = ay1 < by1 ? ay1 : by1;
 			int ox0 = ax0 > bx0 ? ax0 : bx0, ox1 = ax1 < bx1 ? ax1 : bx1;
 			bool edge = (ax1 == bx0 && oy0 < oy1 ) || (ay1 == by0 && ox0 < ox1);
-			bool can = pack_can_swap(h->orient, sizes, n, a, b);
+			bool can = pack_can_swap(h->grid, sizes, n, a, b);
 			bool shown = false;
 			for (int i = 0; i < h->nhits; i++)
 				shown |= h->hits[i].act == A_SWAP && h->hits[i].a == (int)a && h->hits[i].b == (int)b;
@@ -2230,6 +2230,110 @@ static void conf_dir_gone(struct zygote *z)
 }
 
 
+/* ---- the size of the interface (GlassineOS/shell spec 012) --------------------------- */
+
+/* Home on a panel of 1404 x 1872 device px, 157 x 209 mm, at each interface size, in every
+ * voice and both orientations: the canvas is the window's device px; the grid fills the
+ * logical size (more rows and lanes at a smaller size, the design's at Default); a tap
+ * target is never under 7 mm; renders home.size-STEP-VOICE-ORIENT.png. */
+static void sizes(struct zygote *z)
+{
+	static const char *const voices[] = { "white", "editorial", "stationery" };
+	static const int steps[] = { 80, 90, 100, 120 };
+	const double density = 1404 / 157.0;
+	char tf[1024];
+	CHECK(ui_text_size_file(tf, sizeof tf));
+	for (int v = 0; v < 3; v++)
+		for (int l = 0; l < 2; l++) {
+			int rows_prev = 1 << 20, lanes_prev = 1 << 20;
+			for (int k = 0; k < 4; k++) {
+				const char *o = l ? "landscape" : "portrait";
+				setenv("GLASSINE_HOME_VOICE", voices[v], 1);
+				reset();
+				struct home h;
+				struct home_io io = { .commit = on_commit };
+				home_init(&h, z, &io);
+				ui_draw_init();
+				double F = ui_factor(density, steps[k]);
+				int dw = l ? 1872 : 1404, dh = l ? 1404 : 1768;
+				home_resize_px(&h, dw, dh, F);
+				home_output(&h, "EPD-1", "EPD-1", density);
+				home_appear(&h);
+				loop(&h, true, 0, -1, NULL);
+				home_paint(&h, true);
+				loop(&h, true, 0, -1, NULL);
+				char name[32];
+				snprintf(name, sizeof name, "size-%d", steps[k]);
+				save(&h, voices[v], o, name);
+				CHECK_INT(cairo_image_surface_get_width(h.cur), dw);
+				CHECK_INT(cairo_image_surface_get_height(h.cur), dh);
+				CHECK_INT(h.W, (int)lround(dw / F));
+				struct grid b = pack_grid(l ? ORIENT_LANDSCAPE : ORIENT_PORTRAIT);
+				if (steps[k] == 100) {
+					CHECK(F == 2);
+					CHECK_INT(h.grid.rows, b.rows);
+					CHECK_INT(h.grid.lanes, b.lanes);
+				}
+				CHECK(h.grid.rows >= b.rows && h.grid.lanes >= b.lanes);
+				CHECK(h.grid.rows <= rows_prev && h.grid.lanes <= lanes_prev);
+				if (steps[k] == 80)
+					CHECK(h.grid.rows > b.rows); /* a smaller interface shows more */
+				rows_prev = h.grid.rows;
+				lanes_prev = h.grid.lanes;
+				CHECK(fabs(h.mm_per_px - F / density) < 1e-9);
+				CHECK(home_touch_min(&h) * h.mm_per_px >= UI_TAP_MM - 1e-9);
+				home_free(&h);
+			}
+		}
+
+	/* the tap minimum at densities from 3 to 25 px/mm, at every step */
+	static const double dens[] = { 3, UI_FALLBACK_DENSITY, 8.943, 13, 25 };
+	for (int d = 0; d < 5; d++)
+		for (int k = 0; k < 4; k++) {
+			setenv("GLASSINE_HOME_VOICE", "white", 1);
+			reset();
+			struct home h;
+			struct home_io io = { .commit = on_commit };
+			home_init(&h, z, &io);
+			double F = ui_factor(dens[d], steps[k]);
+			home_resize(&h, 702, 884, F);
+			home_output(&h, "X", "X", dens[d]);
+			CHECK(home_touch_min(&h) * h.mm_per_px >= UI_TAP_MM - 1e-9);
+			home_free(&h);
+		}
+
+	/* the text size: read at the start and followed when the file changes; boxes that hold
+	 * text grow, the grid stays; renders home.text-150-VOICE-portrait.png */
+	sh("mkdir -p \"$(dirname '%s')\"", tf);
+	put(tf, "150\n");
+	for (int v = 0; v < 3; v++) {
+		setenv("GLASSINE_HOME_VOICE", voices[v], 1);
+		reset();
+		struct home h;
+		struct home_io io = { .commit = on_commit };
+		home_init(&h, z, &io);
+		ui_draw_init();
+		home_resize(&h, 702, 884, 2);
+		home_output(&h, "EPD-1", "EPD-1", density);
+		CHECK(h.text == 1.5);
+		home_appear(&h);
+		loop(&h, true, 0, -1, NULL);
+		home_paint(&h, true);
+		loop(&h, true, 0, -1, NULL);
+		save(&h, voices[v], "portrait", "text-150");
+		struct grid b = pack_grid(ORIENT_PORTRAIT);
+		CHECK_INT(h.grid.rows, b.rows);
+		if (v == 0) {
+			put(tf, "100\n");
+			loop(&h, true, 600, -1, NULL);
+			CHECK(h.text == 1);
+		}
+		home_free(&h);
+		put(tf, "150\n");
+	}
+	unlink(tf);
+}
+
 int main(void)
 {
 	setup();
@@ -2249,6 +2353,7 @@ int main(void)
 	image_limits();
 	frames_busy();
 	touch_targets(&z);
+	sizes(&z);
 	helper_gone(&z2);
 	zygote_stop(&z2);
 	arrange(&z);

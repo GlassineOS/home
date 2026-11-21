@@ -71,23 +71,30 @@ $(O)/glassine-home-run: src/cli/run.c $(CORE_OBJ) $(SANDBOX_OBJ) | $(O)
 $(CURDIR)/$(O)/ui-stage/lib/pkgconfig/glassine-ui.pc:
 	$(MAKE) -s -C "$(UI_DIR)" install O=$(CURDIR)/$(O)/ui-build PREFIX=$(CURDIR)/$(O)/ui-stage >/dev/null
 
-# the program: xdg-shell from wayland-protocols
-$(O)/proto/xdg-shell-client-protocol.h $(O)/proto/xdg-shell-protocol.c: | $(O)
+# the program: xdg-shell, fractional-scale and viewporter from wayland-protocols
+PROTOS := stable/xdg-shell/xdg-shell.xml staging/fractional-scale/fractional-scale-v1.xml stable/viewporter/viewporter.xml
+PROTO_NAMES := $(basename $(notdir $(PROTOS)))
+PROTO_H := $(PROTO_NAMES:%=$(O)/proto/%-client-protocol.h)
+PROTO_C := $(PROTO_NAMES:%=$(O)/proto/%-protocol.c)
+$(PROTO_H) $(PROTO_C) &: | $(O)
 	mkdir -p $(O)/proto
-	wayland-scanner client-header $(WL_PROTO)/stable/xdg-shell/xdg-shell.xml $(O)/proto/xdg-shell-client-protocol.h
-	wayland-scanner private-code $(WL_PROTO)/stable/xdg-shell/xdg-shell.xml $(O)/proto/xdg-shell-protocol.c
+	for x in $(PROTOS); do n=$$(basename $$x .xml); \
+	    wayland-scanner client-header $(WL_PROTO)/$$x $(O)/proto/$$n-client-protocol.h && \
+	    wayland-scanner private-code $(WL_PROTO)/$$x $(O)/proto/$$n-protocol.c || exit 1; done
 
 # ... and the ink protocol (protocols/, a copy of GlassineOS/protocols'): what a commit is
-$(O)/proto/glassine-ink-v1-client-protocol.h $(O)/proto/glassine-ink-v1-protocol.c: protocols/glassine-ink-v1.xml | $(O)
+INK_H := $(O)/proto/glassine-ink-v1-client-protocol.h
+INK_C := $(O)/proto/glassine-ink-v1-protocol.c
+$(INK_H) $(INK_C) &: protocols/glassine-ink-v1.xml | $(O)
 	mkdir -p $(O)/proto
-	wayland-scanner client-header protocols/glassine-ink-v1.xml $(O)/proto/glassine-ink-v1-client-protocol.h
-	wayland-scanner private-code protocols/glassine-ink-v1.xml $(O)/proto/glassine-ink-v1-protocol.c
+	wayland-scanner client-header protocols/glassine-ink-v1.xml $(INK_H)
+	wayland-scanner private-code protocols/glassine-ink-v1.xml $(INK_C)
 
-$(O)/wl.o: src/wl.c src/*.h $(O)/proto/xdg-shell-client-protocol.h $(O)/proto/glassine-ink-v1-client-protocol.h $(UI_DEP) | $(O)
+$(O)/wl.o: src/wl.c src/*.h $(PROTO_H) $(INK_H) $(UI_DEP) | $(O)
 	$(CC) $(CFLAGS) $(LUA_CFLAGS) $(SCREEN_CFLAGS) -I$(O)/proto $(shell $(PKG_CONFIG) --cflags $(WL_PKGS)) -c -o $@ $<
 
-$(O)/glassine-home: src/cli/home.c $(O)/wl.o $(O)/proto/xdg-shell-protocol.c $(O)/proto/glassine-ink-v1-protocol.c $(SCREEN_OBJ) $(CORE_OBJ) $(SANDBOX_OBJ) | $(O)
-	$(CC) $(CFLAGS) -I$(O)/proto -o $@ src/cli/home.c $(O)/wl.o $(O)/proto/xdg-shell-protocol.c $(O)/proto/glassine-ink-v1-protocol.c $(SCREEN_OBJ) \
+$(O)/glassine-home: src/cli/home.c $(O)/wl.o $(PROTO_C) $(INK_C) $(SCREEN_OBJ) $(CORE_OBJ) $(SANDBOX_OBJ) | $(O)
+	$(CC) $(CFLAGS) -I$(O)/proto -o $@ src/cli/home.c $(O)/wl.o $(PROTO_C) $(INK_C) $(SCREEN_OBJ) \
 	    $(CORE_OBJ) $(SANDBOX_OBJ) $(SCREEN_LIBS) $(shell $(PKG_CONFIG) --libs $(WL_PKGS)) $(LUA_LIBS) $(LDLIBS) $(UI_RPATH)
 
 $(O)/test_home: test/test_home.c $(SCREEN_OBJ) $(CORE_OBJ) $(SANDBOX_OBJ) test/t.h | $(O)
@@ -102,7 +109,7 @@ $(O):
 
 # test_home renders every Home board into out/renders (see test/test_home.c)
 check: $(TESTS:%=$(O)/test_%) $(O)/test_home all
-	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh; sh test/resize.sh; sh test/seat-caps.sh; sh test/content.sh
+	@set -e; for t in $(TESTS); do ./$(O)/test_$$t; done; sh test/reading.sh; sh test/resize.sh; sh test/scale.sh; sh test/seat-caps.sh; sh test/content.sh
 	@FONTCONFIG_FILE=$$(sh test/fonts.sh) ./$(O)/test_home
 
 install: all
