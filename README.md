@@ -42,6 +42,9 @@ headless sway and checks that it follows every size its floating window is given
 (with `sway`) that it commits at the output's fractional or whole scale, also when the scale changes
 and on a second output. `home.size-STEP-*` renders Home at each interface size on a 1404 × 1872 px,
 157 × 209 mm panel, `home.text-150-*` at a text size of 150 %.
+`test/content.sh` (in `make check` when `sway-glassine` and the wlr-protocols XML are installed, else
+skipped) taps Home in a headless sway-glassine and checks that each tap's paint is said to be a page,
+on the first commit after the tap.
 
 ### How the screen behaves
 
@@ -56,7 +59,10 @@ and on a second output. `home.size-STEP-*` renders Home at each interface size o
   `~/.config/glassine/text-size`; the minimums (7 mm tap targets, 2.0/2.8 mm text) use the density of
   the output Home is on, from the session's `$XDG_RUNTIME_DIR/glassine/output-scale` or the size the
   output reports. Both files are watched.
-- One surface, one commit per paint; nothing animates. Input paints at once; widget output,
+- One surface, one commit per paint; nothing animates. The commit that brings a tap's answer is
+  said to be a page (the ink protocol's `set_content`, version 4, where the compositor offers it;
+  the rule is GlassineOS/ui's `UiContent`), so an e-ink panel shows it at once in one exact refresh;
+  other commits say nothing. `GLASSINE_HOME_CONTENT=off`: nothing is said. Input paints at once; widget output,
   images and the clock wait until a second has passed since the last such paint. A paint that
   changes nothing commits nothing; a changed card damages only its rectangle, an image filling in
   only its slot.

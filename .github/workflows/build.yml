@@ -20,7 +20,11 @@ jobs:
             apk add -q build-base lua5.4-dev pkgconf linux-headers git curl \
               cairo-dev pango-dev librsvg-dev glib-dev gdk-pixbuf-dev python3 py3-gobject3 py3-cairo gtk+3.0 \
               font-dejavu font-eb-garamond adwaita-icon-theme wayland-dev wayland-protocols libxkbcommon-dev \
-              sway grim wlrctl
+              sway grim wlrctl wlr-protocols
+            # sway-glassine (the ink protocol, for test/content.sh) where the package repository has it
+            cp test/glassine-20261015.rsa.pub /etc/apk/keys/
+            echo https://pkgs.glassine.org/alpine/v3.24/glassine >>/etc/apk/repositories
+            apk add -q sway-glassine || echo "no sway-glassine for $(uname -m): test/content.sh skips"
             make check'
       - uses: actions/upload-artifact@v4
         if: always()
