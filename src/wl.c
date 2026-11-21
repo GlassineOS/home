@@ -27,6 +27,8 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "home.h"
+#include "fractional-scale-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 struct buffer {
@@ -36,13 +38,29 @@ struct buffer {
 	size_t size;
 };
 
+/* an output: what it says of itself; the one the surface is on gives Home its density */
+struct out {
+	struct wl_output *o;
+	uint32_t id;
+	char name[64], make[64], model[64];
+	int mode_w, mode_h, mm_w, mm_h, scale;
+};
+#define MAX_OUTS 8
+
 static struct {
 	struct wl_display *d;
 	struct wl_compositor *comp;
 	struct wl_shm *shm;
 	struct xdg_wm_base *wm;
 	struct wl_seat *seat;
-	struct wl_output *out;
+	struct out outs[MAX_OUTS];
+	int nouts, on;           /* on: the output the surface entered last (-1: none yet) */
+	/* the surface's preferred scale in 120ths (0: none said): device px per design px
+	 * (shell spec 012), a buffer of that many px shown at the configured size */
+	struct wp_fractional_scale_manager_v1 *fsman;
+	struct wp_viewporter *vpr;
+	struct wp_viewport *vp;
+	uint32_t frac;
 	struct wl_surface *surf;
 	struct xdg_surface *xs;
 	struct xdg_toplevel *top;
@@ -52,15 +70,14 @@ static struct {
 	struct xkb_context *xkb;
 	struct xkb_keymap *km;
 	struct xkb_state *ks;
-	int out_scale, mode_w, mode_h;
-	int cw, ch;              /* configured size, surface px */
+	int cw, ch;              /* configured size, logical px (= design px) */
 	bool configured, activated, running;
 	double px, py;
 	int touch_id;
 	struct buffer buf[FRAME_BUFFERS];
 	struct frames f;         /* which buffer is free, what each copies and the surface damages */
 	struct home *h;
-} W = { .out_scale = 1, .touch_id = -1, .running = true };
+} W = { .on = -1, .touch_id = -1, .running = true };
 
 /* ---- buffers ----------------------------------------------------------------------- */
 
@@ -161,27 +178,67 @@ static void commit(void *ud, const struct rect *r, int n)
 
 /* ---- size ------------------------------------------------------------------------------- */
 
-/* device px per design px: the panel's short side over the design's 702 (as the shell) */
-static int scale(void)
+/* the outputs' whole scale: the one the surface is on, else the largest (as a compositor
+ * without fractional scales has it) */
+static int whole_scale(void)
 {
-	const char *e = getenv("GLASSINE_HOME_SCALE");
-	if (e && atoi(e) > 0)
-		return atoi(e);
-	if (W.mode_w > 0 && W.mode_h > 0) {
-		int sh = W.mode_w < W.mode_h ? W.mode_w : W.mode_h;
-		int s = (int)lround(sh / 702.0);
-		return s < 1 ? 1 : s;
-	}
-	return W.out_scale;
+	if (W.on >= 0)
+		return W.outs[W.on].scale < 1 ? 1 : W.outs[W.on].scale;
+	int s = 1;
+	for (int i = 0; i < W.nouts; i++)
+		if (W.outs[i].scale > s)
+			s = W.outs[i].scale;
+	return s;
 }
 
+/* device px per design px (shell spec 012): the factor the compositor gives the surface, as a
+ * fractional scale, else as the outputs' whole one. GLASSINE_HOME_SCALE overrides both. */
+static double scale(void)
+{
+	const char *e = getenv("GLASSINE_HOME_SCALE");
+	if (e && atof(e) > 0)
+		return atof(e);
+	if (W.frac && W.vp)
+		return W.frac / 120.0;
+	return whole_scale();
+}
+
+static bool fractional(double S)
+{
+	return W.vp && fabs(S - lround(S)) > 1e-9;
+}
+
+/* The window is the configured size in design px; the canvas that times the factor in device
+ * px, shown at the configured size: through the viewport at a fractional factor, else at a
+ * whole buffer scale (byte for byte what a whole scale always gave). */
 static void apply_size(void)
 {
-	int cs = W.out_scale < 1 ? 1 : W.out_scale;
-	int bw = (W.cw ? W.cw : 702) * cs, bh = (W.ch ? W.ch : 884) * cs;
-	int S = scale();
-	wl_surface_set_buffer_scale(W.surf, cs);
-	home_resize(W.h, bw / S, bh / S, S);
+	int lw = W.cw ? W.cw : 702, lh = W.ch ? W.ch : 884;
+	double S = scale();
+	if (fractional(S)) {
+		wl_surface_set_buffer_scale(W.surf, 1);
+		wp_viewport_set_destination(W.vp, lw, lh);
+	} else {
+		if (W.vp)
+			wp_viewport_set_destination(W.vp, -1, -1);
+		wl_surface_set_buffer_scale(W.surf, (int)lround(S));
+	}
+	home_resize(W.h, lw, lh, S);
+}
+
+/* The output the surface is on: its key (spec 011: make, model and serial; wl_output has no
+ * serial, so the key's start), its connector and the density of the size it reports. */
+static void tell_output(void)
+{
+	if (W.on < 0)
+		return;
+	const struct out *o = &W.outs[W.on];
+	char key[256];
+	ui_output_key(o->make, o->model, NULL, o->name, key, sizeof key);
+	double d = 0;
+	if (o->mode_w > 0 && ui_size_plausible(o->mode_w, o->mode_h, o->mm_w, o->mm_h))
+		d = o->mode_w / (double)o->mm_w;
+	home_output(W.h, key, o->name, d);
 }
 
 /* ---- xdg ------------------------------------------------------------------------------- */
@@ -228,9 +285,10 @@ static const struct xdg_toplevel_listener top_listener = { top_configure, top_cl
 
 /* ---- input --------------------------------------------------------------------------- */
 
+/* surface coordinates are logical px, which are design px */
 static double lx(double v)
 {
-	return v * (W.out_scale < 1 ? 1 : W.out_scale) / W.h->S;
+	return v;
 }
 
 static void p_enter(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *sf, wl_fixed_t x, wl_fixed_t y)
@@ -407,26 +465,73 @@ static void seat_name(void *d, struct wl_seat *s, const char *n) {}
 static const struct wl_seat_listener seat_listener = { seat_caps, seat_name };
 
 static void o_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph, int32_t sp,
-		       const char *mk, const char *md, int32_t tr) {}
+		       const char *mk, const char *md, int32_t tr)
+{
+	struct out *u = d;
+	u->mm_w = pw;
+	u->mm_h = ph;
+	snprintf(u->make, sizeof u->make, "%s", mk ? mk : "");
+	snprintf(u->model, sizeof u->model, "%s", md ? md : "");
+}
 static void o_mode(void *d, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t r)
 {
+	struct out *u = d;
 	if (flags & WL_OUTPUT_MODE_CURRENT) {
-		W.mode_w = w;
-		W.mode_h = h;
+		u->mode_w = w;
+		u->mode_h = h;
 	}
 }
 static void o_done(void *d, struct wl_output *o)
 {
-	if (W.surf && W.configured)
+	struct out *u = d;
+	if (W.on >= 0 && u == &W.outs[W.on])
+		tell_output();
+	if (W.surf && W.configured) {
 		apply_size();
+		W.h->dirty_now = true;
+	}
 }
 static void o_scale(void *d, struct wl_output *o, int32_t f)
 {
-	W.out_scale = f;
+	((struct out *)d)->scale = f;
 }
+static void o_name(void *d, struct wl_output *o, const char *n)
+{
+	struct out *u = d;
+	snprintf(u->name, sizeof u->name, "%s", n ? n : "");
+}
+static void o_desc(void *d, struct wl_output *o, const char *n) {}
 static const struct wl_output_listener out_listener = {
-	.geometry = o_geometry, .mode = o_mode, .done = o_done, .scale = o_scale,
+	.geometry = o_geometry, .mode = o_mode, .done = o_done, .scale = o_scale, .name = o_name, .description = o_desc,
 };
+
+static void s_enter(void *d, struct wl_surface *sf, struct wl_output *o)
+{
+	for (int i = 0; i < W.nouts; i++)
+		if (W.outs[i].o == o && W.on != i) {
+			W.on = i;
+			tell_output();
+			if (W.configured) {
+				apply_size();
+				W.h->dirty_now = true;
+			}
+		}
+}
+static void s_leave(void *d, struct wl_surface *sf, struct wl_output *o) {}
+static const struct wl_surface_listener surf_listener = { .enter = s_enter, .leave = s_leave };
+
+/* the compositor's factor for the surface: Home lays out and draws again at it */
+static void fs_scale(void *d, struct wp_fractional_scale_v1 *f, uint32_t s)
+{
+	if (s == W.frac)
+		return;
+	W.frac = s;
+	if (W.configured) {
+		apply_size();
+		W.h->dirty_now = true;
+	}
+}
+static const struct wp_fractional_scale_v1_listener fs_listener = { fs_scale };
 
 static void reg_global(void *d, struct wl_registry *r, uint32_t name, const char *iface, uint32_t ver)
 {
@@ -440,12 +545,37 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name, const char
 	} else if (!strcmp(iface, wl_seat_interface.name) && !W.seat) {
 		W.seat = wl_registry_bind(r, name, &wl_seat_interface, ver < 5 ? ver : 5);
 		wl_seat_add_listener(W.seat, &seat_listener, NULL);
-	} else if (!strcmp(iface, wl_output_interface.name) && !W.out) {
-		W.out = wl_registry_bind(r, name, &wl_output_interface, ver < 2 ? ver : 2);
-		wl_output_add_listener(W.out, &out_listener, NULL);
-	}
+	} else if (!strcmp(iface, wl_output_interface.name) && W.nouts < MAX_OUTS) {
+		struct out *u = &W.outs[W.nouts++];
+		memset(u, 0, sizeof *u);
+		u->id = name;
+		u->scale = 1;
+		u->o = wl_registry_bind(r, name, &wl_output_interface, ver < 4 ? ver : 4);
+		wl_output_add_listener(u->o, &out_listener, u);
+	} else if (!strcmp(iface, wp_fractional_scale_manager_v1_interface.name))
+		W.fsman = wl_registry_bind(r, name, &wp_fractional_scale_manager_v1_interface, 1);
+	else if (!strcmp(iface, wp_viewporter_interface.name))
+		W.vpr = wl_registry_bind(r, name, &wp_viewporter_interface, 1);
 }
-static void reg_remove(void *d, struct wl_registry *r, uint32_t name) {}
+/* an output gone: the surface leaves it (its slot is kept free of events) */
+static void reg_remove(void *d, struct wl_registry *r, uint32_t name)
+{
+	for (int i = 0; i < W.nouts; i++)
+		if (W.outs[i].id == name) {
+			if (wl_output_get_version(W.outs[i].o) >= WL_OUTPUT_RELEASE_SINCE_VERSION)
+				wl_output_release(W.outs[i].o);
+			else
+				wl_output_destroy(W.outs[i].o);
+			W.outs[i] = W.outs[--W.nouts];
+			if (W.on == i)
+				W.on = -1;
+			else if (W.on == W.nouts)
+				W.on = i;
+			if (i < W.nouts)
+				wl_output_set_user_data(W.outs[i].o, &W.outs[i]);
+			return;
+		}
+}
 static const struct wl_registry_listener reg_listener = { reg_global, reg_remove };
 
 static void on_term(int sig)
@@ -476,6 +606,12 @@ int home_wayland_main(struct zygote *z)
 		return 1;
 	}
 	W.surf = wl_compositor_create_surface(W.comp);
+	wl_surface_add_listener(W.surf, &surf_listener, NULL);
+	if (W.fsman && W.vpr) {
+		W.vp = wp_viewporter_get_viewport(W.vpr, W.surf);
+		wp_fractional_scale_v1_add_listener(wp_fractional_scale_manager_v1_get_fractional_scale(W.fsman, W.surf),
+						    &fs_listener, NULL);
+	}
 	W.xs = xdg_wm_base_get_xdg_surface(W.wm, W.surf);
 	xdg_surface_add_listener(W.xs, &xs_listener, NULL);
 	W.top = xdg_surface_get_toplevel(W.xs);

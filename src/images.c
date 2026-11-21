@@ -640,15 +640,15 @@ static cairo_surface_t *icon_picture(struct home *h, const char *id, int w, int 
 	return out;
 }
 
-void img_request(struct home *h, struct card *c, int i, const struct value *item, int lw, int lh)
+void img_request(struct home *h, struct card *c, int i, const struct value *item, int w, int hh)
 {
 	struct imgq *q = h->iq;
-	if (!q || i < 0 || i >= DESC_MAX_IMAGES || lw <= 0 || lh <= 0)
+	if (!q || i < 0 || i >= DESC_MAX_IMAGES || w <= 0 || hh <= 0)
 		return;
 	const struct value *src = v_map_get(item, "src"), *fit = v_map_get(item, "fit");
 	if (!src || src->t != V_STR)
 		return;
-	int w = lw * h->S, hh = lh * h->S, dmode = dither_mode(h);
+	int dmode = dither_mode(h);
 	bool contain = fit && fit->t == V_STR && !strcmp(fit->u.s.p, "contain");
 	const char *s = src->u.s.p;
 	char path[1100] = "";

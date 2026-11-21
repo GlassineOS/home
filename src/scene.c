@@ -23,9 +23,31 @@
 #define EDIT_X 46
 #define EDIT_Y 8
 
+/*
+ * The design's screens, 702 x 884 and 936 x 702: their grids are pack_grid's. A larger
+ * window has as many rows and lanes as fit with cells no smaller than CELL_FIT of the
+ * design's; CHROME_H is the design's height above and below the grid (header, rule, hint).
+ */
+#define CHROME_H 128
+#define CELL_FIT 0.9
+#define TEXT_LH 1.3 /* a line's height over its font size, for boxes that grow with their text */
+
 static UiGc G;
 static struct home *H;
 static ui_col INK, SUB, PAPER;
+static double TAP; /* the least size of a tap target, design px (0: unknown) */
+
+struct grid scene_grid(int W, int Hh)
+{
+	enum orient o = W > Hh ? ORIENT_LANDSCAPE : ORIENT_PORTRAIT;
+	struct grid b = pack_grid(o);
+	double dw = o == ORIENT_LANDSCAPE ? 936 : 702, dh = o == ORIENT_LANDSCAPE ? 702 : 884;
+	double lane = (dw - 2 * PAD_X - (b.lanes - 1) * GAP) / b.lanes;
+	double row = (dh - CHROME_H - (b.rows - 1) * GAP) / b.rows;
+	int lanes = (int)floor((W - 2 * PAD_X + GAP) / (CELL_FIT * lane + GAP));
+	int rows = (int)floor((Hh - CHROME_H + GAP) / (CELL_FIT * row + GAP));
+	return pack_grid_fit(o, lanes, rows);
+}
 
 /* ---- small helpers ------------------------------------------------------------- */
 
@@ -62,6 +84,30 @@ static double text_h(const UiFont *f)
 	double h = 0;
 	ui_text_w(&G, f, "Ag", &h);
 	return h;
+}
+
+/* a control's size: the design's, or the least a tap target may be */
+static double tap(double d)
+{
+	return d < TAP ? TAP : d;
+}
+
+/* a box of height h that holds a line in f, once the text has grown (the text size, a minimum) */
+static double grow(double h, const UiFont *f)
+{
+	return ui_grow(h, f, 1, TEXT_LH);
+}
+
+/* a square control of size d, its right edge at xr, centred on cy */
+static struct rect sq(double xr, double cy, double d)
+{
+	return (struct rect){ xr - d, cy - d / 2, d, d };
+}
+
+/* a widget's button: one line of the title style */
+static double wbtn_h(void)
+{
+	return tap(grow(36, &H->v->titleFont));
 }
 
 static double btn_r(void)
@@ -218,9 +264,11 @@ void home_status(const struct home *h, char *title, size_t tlen, char *sub, size
 static double paint_header(void)
 {
 	const UiVoice *v = H->v;
-	double cy = PAD_TOP + HEAD_H / 2.0, xr = H->W - PAD_X;
+	UiFont df = fpx(&v->dateFont, 13);
+	double hd = tap(grow(grow(HEAD_H, &v->headFont), &df)), tp = tap(44);
+	double cy = PAD_TOP + hd / 2.0, xr = H->W - PAD_X;
 	/* Arrange / Done */
-	struct rect b = { xr - 48, cy - 24, 48, 48 };
+	struct rect b = sq(xr, cy, tap(48));
 	if (H->edit)
 		icon_button(b, "check", 24, v->selFg, true, A_DONE, -1, 0, true);
 	else
@@ -233,12 +281,12 @@ static double paint_header(void)
 		double lw = ui_text_w(&G, &v->pageFont, lbl, NULL);
 		if (lw < 34)
 			lw = 34;
-		struct rect nx = { xr - 44, cy - 22, 44, 44 };
+		struct rect nx = sq(xr, cy, tp);
 		icon_button(nx, "chevron_right", 24, INK, false, A_PAGE_NEXT, -1, 0, H->page + 1 < H->npages);
 		double lx = nx.x - 4 - lw;
 		double th = text_h(&v->pageFont);
 		ui_text(&G, &v->pageFont, lbl, lx + lw / 2, cy - th / 2, 1, 0, INK, NULL);
-		struct rect pv = { lx - 4 - 44, cy - 22, 44, 44 };
+		struct rect pv = sq(lx - 4, cy, tp);
 		icon_button(pv, "chevron_left", 24, INK, false, A_PAGE_PREV, -1, 0, H->page > 0);
 		xr = pv.x - 8;
 	}
@@ -249,11 +297,10 @@ static double paint_header(void)
 	} else {
 		home_status(H, title, sizeof title, sub, sizeof sub);
 	}
-	UiFont df = fpx(&v->dateFont, 13);
 	double h1 = text_h(&v->headFont), h2 = text_h(&df), top = cy - (h1 + 2 + h2) / 2, mw = xr - PAD_X;
 	ui_text(&G, &v->headFont, title, PAD_X, top, 0, mw, INK, NULL);
 	ui_text(&G, &df, sub, PAD_X, top + h1 + 2, 0, mw, SUB, NULL);
-	double ry = PAD_TOP + HEAD_H + 8;
+	double ry = PAD_TOP + hd + 8;
 	ui_hline(&G, PAD_X, ry, H->W - 2 * PAD_X, v->headRuleW, v->headRuleC, 0);
 	region_add((struct rect){ 0, 0, H->W, ry + v->headRuleW }, R_HEADER, -1);
 	return ry + v->headRuleW;
@@ -265,8 +312,7 @@ struct grid_geo { double gx, gy, gw, gh, cw, rh; int C, R; };
 
 static struct grid_geo geo(double top, double bottom, bool edit, double xoff)
 {
-	struct grid g;
-	g = pack_grid(H->orient);
+	struct grid g = H->grid;
 	struct grid_geo o;
 	o.C = 4 * g.lanes;
 	o.R = g.rows;
@@ -290,8 +336,23 @@ static struct rect cell_rect(const struct grid_geo *g, const struct pack_pos *p)
 
 static void paint_slot(struct card *c, int k, const struct value *it, struct rect r)
 {
+	bool whole = H->S == floor(H->S);
+	int iw, ih;
+	if (whole) {
+		iw = (int)lround(r.w) * (int)H->S;
+		ih = (int)lround(r.h) * (int)H->S;
+	} else {
+		/* at a factor that isn't whole the slot sits on whole device px: its picture is shown as prepared */
+		double x1 = ui_snap_x(G.cr, r.x + r.w), y1 = ui_snap_y(G.cr, r.y + r.h);
+		r.x = ui_snap_x(G.cr, r.x);
+		r.y = ui_snap_y(G.cr, r.y);
+		r.w = x1 - r.x;
+		r.h = y1 - r.y;
+		iw = ui_device_px(r.w, H->S);
+		ih = ui_device_px(r.h, H->S);
+	}
 	region_add(r, R_SLOT, (int)(c - H->cards));
-	img_request(H, c, k, it, (int)lround(r.w), (int)lround(r.h));
+	img_request(H, c, k, it, iw, ih);
 	const struct img *im = &c->img[k];
 	if (im->surf) {
 		cairo_t *cr = G.cr;
@@ -301,6 +362,8 @@ static void paint_slot(struct card *c, int k, const struct value *it, struct rec
 			cairo_translate(cr, r.x, r.y);
 			cairo_scale(cr, 1.0 / H->S, 1.0 / H->S);
 			cairo_set_source_surface(cr, im->surf, 0, 0);
+			if (!whole)
+				cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
 			cairo_paint(cr);
 			cairo_restore(cr);
 		}
@@ -311,14 +374,14 @@ static void paint_slot(struct card *c, int k, const struct value *it, struct rec
 	const struct value *alt = v_map_get(it, "alt");
 	if (alt && r.w > 16 && r.h > 12) {
 		UiFont f = fpx(&H->v->dateFont, 11);
-		double th = ui_text_wrap(&G, &f, alt->u.s.p, 0, 0, r.w - 8, (int)((r.h - 8) / (11 * 1.25)) + 1, 0, 0);
+		int lines = (int)((r.h - 8) / (ui_text_px(&f) * 1.25)) + 1;
+		double th = ui_text_wrap(&G, &f, alt->u.s.p, 0, 0, r.w - 8, lines, 0, 0);
 		if (th > r.h - 8)
 			th = r.h - 8;
 		cairo_save(G.cr);
 		cairo_rectangle(G.cr, r.x + 2, r.y + 2, r.w - 4, r.h - 4);
 		cairo_clip(G.cr);
-		ui_text_wrap(&G, &f, alt->u.s.p, r.x + 4, r.y + (r.h - th) / 2, r.w - 8,
-			     (int)((r.h - 8) / (11 * 1.25)) + 1, 0, SUB);
+		ui_text_wrap(&G, &f, alt->u.s.p, r.x + 4, r.y + (r.h - th) / 2, r.w - 8, lines, 0, SUB);
 		cairo_restore(G.cr);
 	}
 }
@@ -382,7 +445,7 @@ static double item_h(const struct value *it, const struct value *side, const UiF
 		const struct value *rows = v_map_get(it, "rows");
 		hh = rows ? rows->u.a.n * (text_h(tf) + 6) : 0;
 	} else if (!strcmp(t, "button")) {
-		hh = 36;
+		hh = wbtn_h();
 	} else {
 		return 0;
 	}
@@ -536,11 +599,12 @@ static void paint_script(struct card *c, int ci, struct rect in)
 				ui_hline(&G, cx, y + hh - 1, cw, 1, UI_RULE, 2);
 			}
 		} else if (!strcmp(t, "button")) {
-			if (y + 36 > body.y + body.h + 4) /* the clip's room below */
+			double bh = wbtn_h();
+			if (y + bh > body.y + body.h + 4) /* the clip's room below */
 				break; /* a button shows whole or not at all (Arrange's smaller cards) */
 			const char *label = str_of(it, "label"), *icon = str_of(it, "icon");
 			double lw = ui_text_w(&G, &v->titleFont, label, NULL);
-			double bw = 12 + (icon ? 26 : 0) + lw + 12;
+			double bw = tap(12 + (icon ? 26 : 0) + lw + 12);
 			if (bw > cw)
 				bw = cw;
 			/* an app that isn't installed: the button shows, greyed, says so, and does nothing */
@@ -549,21 +613,21 @@ static void paint_script(struct card *c, int ci, struct rect in)
 			double ww = off ? 8 + ui_text_w(&G, &lf, why, NULL) : 0;
 			if (bw + ww > cw)
 				bw = cw - ww > 0 ? cw - ww : cw;
-			struct rect b = { cx, y, bw, 36 };
+			struct rect b = { cx, y, bw, bh };
 			bool sel = !off && v_map_get(it, "selected") != NULL;
 			button_box(b, sel);
 			ui_col fg = off ? UI_RULE : sel ? v->selFg : INK;
 			double tx = cx + 12;
 			if (icon) {
-				ui_icon_material(&G, icon, 20, tx + 10, y + 18, fg);
+				ui_icon_material(&G, icon, 20, tx + 10, y + bh / 2, fg);
 				tx += 26;
 			}
-			ui_text(&G, &v->titleFont, label, tx, y + (36 - text_h(&v->titleFont)) / 2, 0, cx + bw - 12 - tx, fg, NULL);
+			ui_text(&G, &v->titleFont, label, tx, y + (bh - text_h(&v->titleFont)) / 2, 0, cx + bw - 12 - tx, fg, NULL);
 			if (off && cx + bw + ww <= cx + cw)
-				ui_text(&G, &lf, why, cx + bw + 8, y + (36 - text_h(&lf)) / 2, 0, cw - bw - 8, SUB, NULL);
+				ui_text(&G, &lf, why, cx + bw + 8, y + (bh - text_h(&lf)) / 2, 0, cw - bw - 8, SUB, NULL);
 			if (!H->edit && !off)
 				hit_add(b, A_WBUTTON, ci, (int)i, NULL, true, btn_r());
-			hh = 36;
+			hh = bh;
 		} else {
 			continue; /* meta: drawn at the bottom */
 		}
@@ -593,9 +657,10 @@ static size_t card_apps(const struct card *c, const struct app **out, size_t max
 	return n;
 }
 
-static int app_rows(double card_h)
+/* the rows of apps a card of this height holds: a row is an icon over a name in nf; head_h: the card's header */
+static int app_rows(double card_h, double head_h, const UiFont *nf)
 {
-	int r = (int)floor((card_h - 60) / 94);
+	int r = (int)floor((card_h - 20 - head_h) / grow(94, nf));
 	return r < 1 ? 1 : r;
 }
 
@@ -606,7 +671,8 @@ static void paint_apps(struct card *c, int ci, struct rect in, double card_h, st
 	if (!list)
 		return;
 	size_t n = card_apps(c, list, H->apps.n + 1);
-	int rows = app_rows(card_h), per = rows * 4, npg = n ? (int)((n + per - 1) / per) : 1;
+	UiFont nf = fpx(&v->appNameFont, 13);
+	int rows = app_rows(card_h, head.h, &nf), per = rows * 4, npg = n ? (int)((n + per - 1) / per) : 1;
 	if (c->apage >= npg)
 		c->apage = npg - 1;
 	if (c->apage < 0)
@@ -620,10 +686,10 @@ static void paint_apps(struct card *c, int ci, struct rect in, double card_h, st
 		double lw = ui_text_w(&G, &pf, lbl, NULL);
 		if (lw < 30)
 			lw = 30;
-		struct rect nx = { xr - 40, cy - 20, 40, 40 };
+		struct rect nx = sq(xr, cy, tap(40));
 		icon_button(nx, "chevron_right", 22, INK, false, A_APPS_NEXT, ci, 0, c->apage + 1 < npg);
 		ui_text(&G, &pf, lbl, nx.x - 4 - lw / 2, cy - text_h(&pf) / 2, 1, 0, INK, NULL);
-		struct rect pv = { nx.x - 8 - lw - 40, cy - 20, 40, 40 };
+		struct rect pv = sq(nx.x - 8 - lw, cy, tap(40));
 		icon_button(pv, "chevron_left", 22, INK, false, A_APPS_PREV, ci, 0, c->apage > 0);
 	}
 	if (!n) {
@@ -643,7 +709,6 @@ static void paint_apps(struct card *c, int ci, struct rect in, double card_h, st
 	if (H->edit && G.paint)
 		cairo_push_group(cr);
 	double tw = (in.w - 3 * 4) / 4, th = (in.h - (rows - 1) * 4) / rows;
-	UiFont nf = fpx(&v->appNameFont, 13);
 	double nh = text_h(&nf), oh = text_h(&v->appCatFont);
 	for (int k = 0; k < per && (size_t)(c->apage * per + k) < n; k++) {
 		const struct app *a = list[c->apage * per + k];
@@ -685,24 +750,25 @@ static void paint_card(int ci, struct rect r)
 	const char *name = card_name(H, c, nb, sizeof nb);
 	/* the header row: icon, name, then the pager or Arrange's buttons */
 	bool tall = H->edit || (c->nat != NAT_NONE);
-	double hh = tall ? 40 : 24, cy = in.y + hh / 2, xr = in.x + in.w;
+	double tc = tap(40); /* the header's controls: Arrange's buttons, an app widget's pager */
+	double hh = tall ? tap(grow(40, &v->lbl)) : grow(24, &v->lbl), cy = in.y + hh / 2, xr = in.x + in.w;
 	struct rect head = { in.x, in.y, in.w, hh };
 	if (H->edit) {
 		bool settings = card_has_settings(H, c);
 		bool sizes = c->nat != NAT_NONE || (c->m && c->m->nsizes > 1);
 		const char *size_icon = c->nat != NAT_NONE ? "height"
 			: H->conf.w[ci].size == SIZE_WIDE ? "close_fullscreen" : "open_in_full";
-		struct rect b = { xr - 40, cy - 20, 40, 40 };
+		struct rect b = sq(xr, cy, tc);
 		ctl_button(b, "close", true, A_CTL_REMOVE, ci);
-		b.x -= 46;
+		b.x -= tc + 6;
 		ctl_button(b, size_icon, sizes, A_CTL_SIZE, ci);
 		if (settings) {
-			b.x -= 46;
+			b.x -= tc + 6;
 			ctl_button(b, "tune", true, A_CTL_SETTINGS, ci);
 		}
 		xr = b.x - 6;
 	} else if (c->nat != NAT_NONE) {
-		xr -= 40 + 8 + 30 + 4 + 40 + 6; /* room for the pager (painted with the apps) */
+		xr -= tc + 8 + 30 + 4 + tc + 6; /* room for the pager (painted with the apps) */
 	}
 	ui_icon_material(&G, card_icon(c), 18, in.x + 9, cy, INK);
 	double lh = text_h(&v->lbl);
@@ -742,8 +808,9 @@ static void paint_peek(int page, const struct pack_pos *pos, size_t n, double le
 
 static void swap_button(double cx, double cy, bool vertical, int a, int b)
 {
-	struct rect r = { cx - 22, cy - 22, 44, 44 };
-	ui_rrect(&G, r.x - 3, r.y - 3, 50, 50, btn_r() + 3, PAPER);
+	double d = tap(44);
+	struct rect r = { cx - d / 2, cy - d / 2, d, d };
+	ui_rrect(&G, r.x - 3, r.y - 3, d + 6, d + 6, btn_r() + 3, PAPER);
 	ui_box(&G, r.x, r.y, r.w, r.h, &H->v->sel);
 	ui_icon_material(&G, vertical ? "swap_vert" : "swap_horiz", 24, cx, cy, H->v->selFg);
 	hit_add(r, A_SWAP, a, b, NULL, true, btn_r());
@@ -751,12 +818,13 @@ static void swap_button(double cx, double cy, bool vertical, int a, int b)
 
 static void page_swap_button(double cx, double cy, int a, int b)
 {
-	struct rect r = { cx - 22, cy - 22, 44, 44 };
-	ui_rrect(&G, r.x - 3, r.y - 3, 50, 50, 25, PAPER);
-	ui_rrect(&G, r.x, r.y, 44, 44, 22, INK);
-	ui_rrect(&G, r.x + 2, r.y + 2, 40, 40, 20, PAPER);
+	double d = tap(44);
+	struct rect r = { cx - d / 2, cy - d / 2, d, d };
+	ui_rrect(&G, r.x - 3, r.y - 3, d + 6, d + 6, d / 2 + 3, PAPER);
+	ui_rrect(&G, r.x, r.y, d, d, d / 2, INK);
+	ui_rrect(&G, r.x + 2, r.y + 2, d - 4, d - 4, d / 2 - 2, PAPER);
 	ui_icon_material(&G, "sync_alt", 24, cx, cy, INK);
-	hit_add(r, A_PAGE_SWAP, a, b, NULL, true, 22);
+	hit_add(r, A_PAGE_SWAP, a, b, NULL, true, d / 2);
 }
 
 /* ---- the page ------------------------------------------------------------------------ */
@@ -773,14 +841,14 @@ static void paint_page(double top, double bottom)
 	}
 	for (size_t i = 0; i < n; i++)
 		sizes[i] = H->conf.w[i].size;
-	int real = pack(H->orient, sizes, n, pos);
+	int real = pack(H->grid, sizes, n, pos);
 	int pages = real;
 	struct pack_pos add = { 0 };
 	if (H->edit) {
 		sizes[n] = SIZE_HALF;
 		struct pack_pos *p2 = calloc(n + 1, sizeof *p2);
 		if (p2) {
-			pages = pack(H->orient, sizes, n + 1, p2);
+			pages = pack(H->grid, sizes, n + 1, p2);
 			add = p2[n];
 			free(p2);
 		}
@@ -823,7 +891,7 @@ static void paint_page(double top, double bottom)
 				int oy0 = ay0 > by0 ? ay0 : by0, oy1 = ay1 < by1 ? ay1 : by1;
 				int ox0 = ax0 > bx0 ? ax0 : bx0, ox1 = ax1 < bx1 ? ax1 : bx1;
 				bool vedge = ax1 == bx0 && oy0 < oy1, hedge = ay1 == by0 && ox0 < ox1;
-				if ((!vedge && !hedge) || !pack_can_swap(H->orient, sizes, n, a, b))
+				if ((!vedge && !hedge) || !pack_can_swap(H->grid, sizes, n, a, b))
 					continue;
 				if (vedge)
 					swap_button(g.gx + ax1 * (g.cw + GAP) - GAP / 2.0,
@@ -854,7 +922,7 @@ static void count_pages(void)
 			sizes[i] = H->conf.w[i].size;
 		if (H->edit)
 			sizes[n++] = SIZE_HALF;
-		pages = pack(H->orient, sizes, n, pos);
+		pages = pack(H->grid, sizes, n, pos);
 	}
 	free(sizes);
 	free(pos);
@@ -882,19 +950,21 @@ struct srow {
 static double sheet_row_h(const struct srow *r, double w, int clamp, double minh, const UiFont *sf)
 {
 	double nh = text_h(&H->v->titleFont);
-	double tw = w - 28 - 12 - (r->btn_icon ? 44 + 12 : 0);
+	double tb = tap(44);
+	double tw = w - 28 - 12 - (r->btn_icon ? tb + 12 : 0);
 	double sh = r->sub[0] ? ui_text_wrap(&G, sf, r->sub, 0, 0, tw, clamp, 1.35, 0) : 0;
 	double h = 6 + nh + (r->sub[0] ? 2 + sh : 0) + 6;
-	if (r->btn_icon && h < 44 + 12)
-		h = 44 + 12;
-	return h < minh ? minh : h;
+	if (r->btn_icon && h < tb + 12)
+		h = tb + 12;
+	return tap(h < minh ? minh : h);
 }
 
 static void paint_sheet_row(const struct srow *r, struct rect box, int clamp, const UiFont *sf)
 {
 	const UiVoice *v = H->v;
 	double nh = text_h(&v->titleFont);
-	double tw = box.w - 28 - 12 - (r->btn_icon ? 44 + 12 : 0);
+	double tb = tap(44);
+	double tw = box.w - 28 - 12 - (r->btn_icon ? tb + 12 : 0);
 	double sh = r->sub[0] ? ui_text_wrap(&G, sf, r->sub, 0, 0, tw, clamp, 1.35, 0) : 0;
 	double th = nh + (r->sub[0] ? 2 + sh : 0), ty = box.y + (box.h - th) / 2, cy = box.y + box.h / 2;
 	if (r->app_icon && ui_icon(&G, r->app_icon, 24, box.x + 14, cy, INK))
@@ -906,9 +976,9 @@ static void paint_sheet_row(const struct srow *r, struct rect box, int clamp, co
 		ui_text_wrap(&G, sf, r->sub, box.x + 40, ty + nh + 2, tw, clamp, 1.35, SUB);
 	ui_hline(&G, box.x, box.y + box.h - v->sepSoftW, box.w, v->sepSoftW, v->sepSoftC, 0);
 	if (r->btn_icon) {
-		struct rect b = { box.x + box.w - 44, cy - 22, 44, 44 };
+		struct rect b = sq(box.x + box.w, cy, tb);
 		button_box(b, r->selected);
-		ui_icon_material(&G, r->btn_icon, 22, b.x + 22, b.y + 22, r->btn_dim ? SUB : r->selected ? v->selFg : INK);
+		ui_icon_material(&G, r->btn_icon, 22, b.x + tb / 2, b.y + tb / 2, r->btn_dim ? SUB : r->selected ? v->selFg : INK);
 		if (r->act != A_NONE && r->act_on_button)
 			hit_add(b, r->act, r->a, r->b, NULL, true, btn_r());
 	}
@@ -1121,7 +1191,7 @@ static void paint_sheet(void)
 	hit_add((struct rect){ 0, 0, H->W, H->H }, A_SHEET_OUTSIDE, -1, 0, NULL, false, 0);
 	UiFont sf = fpx(&v->dateFont, 12.5), hsf = fpx(&v->dateFont, 13);
 	double inner = sw - 36, colw = cols == 2 ? (inner - 22) / 2 : inner;
-	double headh = 44, maxh = H->H - 24;
+	double tb = tap(44), headh = tap(grow(grow(44, &v->nameFont), &hsf)), maxh = H->H - 24;
 	double noteh = 0;
 	for (int i = 0; i < nnotes; i++)
 		noteh += ui_text_wrap(&G, &sf, notes[i], 0, 0, inner, 6, 0, 0) + 10;
@@ -1173,18 +1243,18 @@ static void paint_sheet(void)
 	double x = s.x + 18, y = s.y + 16, cy = y + headh / 2;
 	if (!(app_icon && ui_icon(&G, app_icon, 30, x + 15, cy, INK)))
 		ui_icon_material(&G, icon, 30, x + 15, cy, INK);
-	struct rect cl = { s.x + s.w - 18 - 44, y, 44, 44 };
+	struct rect cl = sq(s.x + s.w - 18, cy, tb);
 	icon_button(cl, "close", 22, INK, false, A_SHEET_CLOSE, -1, 0, true);
 	double xr = cl.x - 12;
 	if (np > 1) {
 		char lbl[16];
 		snprintf(lbl, sizeof lbl, "%d/%d", H->sheet_page + 1, np);
-		struct rect nx = { xr - 44, y, 44, 44 };
+		struct rect nx = sq(xr, cy, tb);
 		icon_button(nx, "chevron_right", 24, INK, false, A_SHEET_NEXT, -1, 0, H->sheet_page + 1 < np);
 		double lw = ui_text_w(&G, &v->pageFont, lbl, NULL);
 		lw = lw < 34 ? 34 : lw;
 		ui_text(&G, &v->pageFont, lbl, nx.x - 4 - lw / 2, cy - text_h(&v->pageFont) / 2, 1, 0, INK, NULL);
-		struct rect pv = { nx.x - 8 - lw - 44, y, 44, 44 };
+		struct rect pv = sq(nx.x - 8 - lw, cy, tb);
 		icon_button(pv, "chevron_left", 24, INK, false, A_SHEET_PREV, -1, 0, H->sheet_page > 0);
 		xr = pv.x - 12;
 	}
@@ -1220,6 +1290,8 @@ void scene_paint(struct home *h, cairo_t *cr)
 {
 	H = h;
 	G = (UiGc){ cr, 1, h->v };
+	ui_metrics_voice(h->v, h->mm_per_px, h->text);
+	TAP = ui_min_tap();
 	INK = h->v->ink;
 	SUB = h->v->sub;
 	PAPER = h->v->screenBg;
