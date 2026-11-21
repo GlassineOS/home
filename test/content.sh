@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # glassine-home in a headless sway that offers the ink protocol's version 4 (sway-glassine,
 # or $GLASSINE_TEST_SWAY): Home says a tap's answer is a page, on the commit that shows it.
-# Taps over the whole window (test/vpointer.c: one virtual pointer); in Home's WAYLAND_DEBUG log every set_content(1)
-# must follow a button release with no commit of Home's surface between them (the first
-# paint after the tap), be followed by that commit, and no release may give two. At least
-# one tap must give a page; a run with GLASSINE_HOME_CONTENT=off says nothing.
+# Taps through one virtual pointer (test/vpointer.c): the header's Arrange/Done button,
+# which turns the edit mode on and off (a repaint each time), between taps on the title
+# (no repaint). In Home's WAYLAND_DEBUG log every set_content(1) must follow a button
+# release with no commit of Home's surface between them (the first paint after the tap),
+# be followed by that commit, and no release may give two. Most button taps must give a
+# page, and no more taps than repaint; a run with GLASSINE_HOME_CONTENT=off says nothing.
 # Without such a sway or the wlr-protocols XML: skipped.
 set -eu
 top=$(pwd)
@@ -55,11 +57,10 @@ run() { # LOG [ENV=VALUE]: Home, tapped on a grid over the window
 		WAYLAND_DEBUG=1 "$@" "$home" >"$log" 2>&1 &
 	home_pid=$!
 	sleep 2
+	# Arrange/Done at the header's right end (x = width - 16 - 24), the title left of it
 	pts=
-	for y in 60 200 340 480 620 760 900; do
-		for x in 80 350 620; do
-			pts="$pts $x,$y"
-		done
+	for _ in 1 2 3 4 5 6 7 8; do
+		pts="$pts 660,60 300,60"
 	done
 	# the output is 702x936 logical px (1404x1872 at scale 2)
 	# shellcheck disable=SC2086
@@ -91,8 +92,9 @@ bad() {
 	fails=$((fails + 1))
 	printf 'FAIL %s\n' "$1" >&2
 }
-[ "$taps" -ge 10 ] || bad "taps reached Home: $taps"
-[ "$pages" -ge 1 ] || bad "no tap gave a page ($taps taps)"
+[ "$taps" -ge 16 ] || bad "taps reached Home: $taps"
+[ "$pages" -ge 6 ] || bad "only $pages pages for 8 taps on Arrange/Done ($taps taps): $seq"
+[ "$pages" -le 8 ] || bad "$pages pages, more than the 8 taps that repaint: $seq"
 # a page right after a release (no commit between), and its commit right after it
 echo "$seq" | grep -qE '(^|C)P|PP|P(R|S)|P$' && bad "a page not on the first commit after a tap: $seq"
 echo "$seq" | grep -q 'S' && bad "a kind other than page: $seq"
