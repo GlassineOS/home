@@ -10,7 +10,7 @@
  *   GLASSINE_HOME_WIDGETS  the built-in widgets [/usr/share/glassine-home/widgets]
  *   GLASSINE_HOME_NATIVE   the settings scripts of Home's own app widgets [/usr/share/glassine-home/native]
  *   GLASSINE_HOME_VOICE    white | editorial | stationery [~/.config/glassine-shell/theme]
- *   GLASSINE_HOME_SCALE    device px per design px [the panel's short side / 702]
+ *   GLASSINE_HOME_SCALE    device px per design px [the surface's fractional scale, else the output's]
  *   GLASSINE_HOME_APPS     the application directories, colon-separated (tests) [the XDG ones]
  *
  * Exits 1 when the widget helper (the zygote) stops, an out-of-memory kill say: it
